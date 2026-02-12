@@ -61,7 +61,6 @@ const $fileInput = document.getElementById('fileInput');
 const $fileList = document.getElementById('fileList');
 const $prompt = document.getElementById('prompt');
 const $runBtn = document.getElementById('runBtn');
-const $modelSelect = document.getElementById('modelSelect');
 const $status = document.getElementById('status');
 const $codePanel = document.getElementById('codePanel');
 const $logPanel = document.getElementById('logPanel');
@@ -891,7 +890,6 @@ $cancelBtn.addEventListener('click', () => {
 $runBtn.addEventListener('click', async () => {
   const apiKey = $apiKey.value.trim();
   const prompt = $prompt.value.trim();
-  const model = $modelSelect.value;
   if (!apiKey || !prompt || state.files.length === 0) return;
 
   clearPanel($codePanel);
@@ -925,14 +923,14 @@ $runBtn.addEventListener('click', async () => {
         logTo($logPanel, 'Pruned old tool results to manage context window.', 'log-warn');
       }
 
-      let response = await callClaudeWithTools(apiKey, model, SYSTEM_PROMPT, messages, TOOLS, signal);
+      let response = await callClaudeWithTools(apiKey, 'claude-sonnet-4-5-20250929', SYSTEM_PROMPT, messages, TOOLS, signal);
 
       // Handle max_tokens truncation: if last block is tool_use, retry with higher limit
       if (response.stop_reason === 'max_tokens') {
         const last = response.content[response.content.length - 1];
         if (last?.type === 'tool_use') {
           logTo($logPanel, 'Response truncated mid-tool-call — retrying with higher limit...', 'log-warn');
-          response = await callClaudeWithTools(apiKey, model, SYSTEM_PROMPT, messages, TOOLS, signal, MAX_TOKENS_EXTENDED);
+          response = await callClaudeWithTools(apiKey, 'claude-sonnet-4-5-20250929', SYSTEM_PROMPT, messages, TOOLS, signal, MAX_TOKENS_EXTENDED);
         }
       }
 

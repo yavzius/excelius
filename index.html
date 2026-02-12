@@ -157,14 +157,6 @@
     .log-success { color: #4a9; }
     .log-meta { color: #666; font-style: italic; }
 
-    /* Model selector */
-    .model-select {
-      padding: 0.4rem 0.5rem; background: #1a1a1a;
-      border: 1px solid #333; border-radius: 4px;
-      color: #888; font-size: 0.8rem;
-    }
-    .model-select:focus-visible { outline: 2px solid #4a9; outline-offset: 2px; }
-
     @media (max-width: 768px) {
       .panels { grid-template-columns: 1fr; }
       body { padding: 1rem; }
@@ -204,11 +196,6 @@
       <div class="controls">
         <button class="btn-run" id="runBtn" disabled>Run</button>
         <button class="btn-cancel" id="cancelBtn" hidden>Cancel</button>
-        <label for="modelSelect" class="visually-hidden">Model</label>
-        <select class="model-select" id="modelSelect">
-          <option value="claude-sonnet-4-5-20250929">Sonnet 4.5</option>
-          <option value="claude-opus-4-6">Opus 4.6</option>
-        </select>
         <span class="status" id="status"></span>
         <span class="tokens" id="tokenCounter"></span>
         <span class="spacer"></span>
