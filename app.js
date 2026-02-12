@@ -554,32 +554,45 @@ function executeTool(name, input) {
   }
 }
 
-// ── System Prompt ─────────────────────────────────────────
-const SYSTEM_PROMPT = `You are an Excel processing agent. The user has uploaded Excel files and wants you to process them.
+// ── System Prompts ───────────────────────────────────────
+// Two distinct prompts: one for the exploration agent (Haiku), one for code gen (Opus).
+// The exploration prompt focuses on thorough data discovery.
+// The code gen prompt receives the structured report and focuses on correct SheetJS code.
 
-The user may be working iteratively — previous outputs may already be in the file list. When you see files from earlier runs, use them as context for the current request.
+const EXPLORATION_PROMPT = `You are a data exploration agent. Your job is to thoroughly understand Excel files so a separate code generation agent can process them correctly.
 
-## How You Work
-
-You have tools to explore the uploaded files. You MUST explore before writing code:
-
-1. First, use \`list_files\` to see what files are available.
-2. Use \`read_rows\` to examine file structure — headers, where data starts, what rows look like.
-3. Use \`get_column_stats\` to understand columns — types, unique values, patterns.
-4. Use \`find_rows\` to look up specific values and verify your understanding.
-5. Use \`compare_keys\` to understand how files relate (shared keys, mismatches).
-6. Only when you fully understand the data, use \`generate_code\` to submit processing code.
+## Your Tools
+- list_files: See what files are available
+- read_rows: Examine rows (headers, data samples, totals)
+- get_column_stats: Understand column types, unique values, patterns
+- find_rows: Search for specific values
+- compare_keys: Understand relationships between files
+- submit_report: Submit your structured findings when done
 
 ## Exploration Strategy
+1. list_files to see all available files
+2. read_rows on each file: first 5 rows (find headers), rows 5-10 (data samples), last 3 rows (check for totals/summary rows)
+3. get_column_stats on columns that look like keys, amounts, or dates
+4. compare_keys between files on likely join columns
+5. Once you understand the structure, call submit_report with your findings
 
-- Read the first ~10 rows of each file to find headers and data start.
-- Check column types and unique values for key columns.
-- Compare key columns between files to understand joins.
-- Read a few data rows to verify your understanding.
-- Check the last few rows for totals/summary rows.
+## Rules
+- Be thorough. The code agent cannot explore — it only sees your report.
+- If headers aren't in row 0, note the actual header_row.
+- Flag data issues: blank rows, merged cells, serial number dates, inconsistent formats.
+- Identify which columns are keys (high uniqueness) vs values (numeric, repeated).
+- For recommended_approach, consider the user's task and suggest the processing strategy.
+- Do NOT generate code. Your only job is exploration and reporting.
 
-## Code Environment (for generate_code)
+The user's task is provided for context so you know what to look for, but explore broadly — the code agent may need details you didn't anticipate.`;
 
+function buildCodeGenPrompt(report) {
+  return `You are an Excel code generation agent. A data exploration agent has already analyzed the files. Its structured report is below.
+
+## Exploration Report
+${JSON.stringify(report, null, 2)}
+
+## Code Environment
 Your code runs in a Web Worker with these globals:
 - \`files\` — array of { name: string, buffer: ArrayBuffer }
 - \`XLSX\` — SheetJS library. Read with: \`XLSX.utils.sheet_to_json(ws, { header: 1, defval: null })\`
@@ -590,30 +603,31 @@ Code is wrapped as: \`async function(files, XLSX, JSZip, log) { YOUR_CODE }\`
 Must return \`{ buffer: ArrayBuffer, filename: string }\`.
 
 ### SheetJS Quick Reference
-
 Read: \`const wb = XLSX.read(file.buffer, { type: 'array' }); const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: null });\`
 Write: \`const ws = XLSX.utils.aoa_to_sheet(aoa); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Sheet1'); const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx', compression: true });\`
 
 ### Styling with JSZip
-
 After writing data-only xlsx with SheetJS, open with JSZip and inject XML styles:
 \`\`\`
 const zip = await JSZip.loadAsync(buf);
 let stylesXml = await zip.file('xl/styles.xml').async('string');
 // Parse existing counts, inject fonts/fills/borders/numFmts/cellXfs, update counts
-// Then modify sheet XML to add s="N" attributes to <c> elements
 let sheetXml = await zip.file('xl/worksheets/sheet1.xml').async('string');
-// Use regex: /<c r="([A-Z]+)ROW"( s="\\d+")?/ to replace or add s= attr
+// Use regex: /<c r="([A-Z]+)ROW"( s="\\\\d+")?/ to replace or add s= attr
 zip.file(...); const styledBuf = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
 \`\`\`
 
 ### Rules
+- Trust the exploration report. Do not second-guess column names or row positions.
+- Use the header_row from the report — data may not start at row 0.
+- Handle the data_issues flagged in the report (date conversions, blank rows, etc).
 - Return { buffer, filename } — buffer must be ArrayBuffer.
 - Use log() for progress. Log sample data to verify correctness.
 - Use sheet_to_json with { header: 1, defval: null } for reads.
 - For s= attribute regex: always handle both cases (exists → replace, missing → add).
 - Excel dates are serial numbers. Convert: new Date((serial - 25569) * 86400000).
 - Access files by name: files.find(f => f.name.includes('keyword')).`;
+}
 
 // ── Claude API (non-streaming, with tool use + retry) ─────
 async function callClaudeWithTools(apiKey, model, system, messages, tools, signal, maxTokens = MAX_TOKENS_DEFAULT) {
