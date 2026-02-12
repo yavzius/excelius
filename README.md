@@ -25,6 +25,8 @@ Generated code executes inside a sandboxed iframe with `Content-Security-Policy:
 Serve the folder with any static HTTP server:
 
 ```
+bunx serve .
+# or
 npx serve .
 # or
 python3 -m http.server
