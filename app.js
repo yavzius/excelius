@@ -629,6 +629,87 @@ zip.file(...); const styledBuf = await zip.generateAsync({ type: 'arraybuffer', 
 - Access files by name: files.find(f => f.name.includes('keyword')).`;
 }
 
+// ── Exploration Agent (Haiku) ────────────────────────────
+// Runs autonomously: calls exploration tools, then submit_report.
+// Returns the structured ExplorationReport JSON.
+
+async function runExplorationAgent(apiKey, prompt, signal) {
+  const fileList = state.files.map(f => f.name).join(', ');
+  const messages = [
+    { role: 'user', content: `Files available: ${fileList}\n\nUser's task: ${prompt}\n\nPlease explore these files thoroughly, then submit_report with your findings.` },
+  ];
+
+  // Exploration tools: everything except generate_code
+  const explorationTools = TOOLS.filter(t => t.name !== 'generate_code');
+
+  for (let turn = 0; turn < MAX_EXPLORATION_TURNS; turn++) {
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+
+    setStatus(`Exploring (turn ${turn + 1})...`);
+
+    const response = await callClaudeWithTools(
+      apiKey, MODEL_EXPLORE, EXPLORATION_PROMPT, messages, explorationTools, signal
+    );
+
+    updateTokens('explore', response.usage);
+
+    const assistantContent = response.content;
+    messages.push({ role: 'assistant', content: assistantContent });
+
+    // Log text blocks
+    for (const block of assistantContent) {
+      if (block.type === 'text' && block.text.trim()) {
+        logTo($logPanel, block.text, 'log-meta');
+      }
+    }
+
+    // Check for submit_report in tool calls
+    for (const block of assistantContent) {
+      if (block.type === 'tool_use' && block.name === 'submit_report') {
+        logTo($logPanel, `Exploration complete: ${block.input.files?.length || 0} files analyzed`, 'log-success');
+        return block.input;
+      }
+    }
+
+    if (response.stop_reason !== 'tool_use') {
+      throw new Error('Exploration agent stopped without submitting a report');
+    }
+
+    // Process exploration tool calls
+    const toolResults = [];
+
+    for (const block of assistantContent) {
+      if (block.type !== 'tool_use') continue;
+      if (block.name === 'submit_report') continue; // already handled above
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+
+      const { id, name, input } = block;
+      const inputStr = JSON.stringify(input);
+      logTo($logPanel, `\u2192 ${name}(${inputStr.slice(0, 100)}${inputStr.length > 100 ? '...' : ''})`, 'log-info');
+
+      const result = executeTool(name, input);
+      const resultStr = JSON.stringify(result, null, 2);
+      const truncated = resultStr.length > TOOL_RESULT_MAX_CHARS
+        ? resultStr.slice(0, TOOL_RESULT_MAX_CHARS) + `\n... (truncated, ${resultStr.length} chars total)`
+        : resultStr;
+
+      logTo($logPanel, `  \u2190 ${truncated.slice(0, 200)}${truncated.length > 200 ? '...' : ''}`, 'log-info');
+
+      toolResults.push({
+        type: 'tool_result',
+        tool_use_id: id,
+        content: truncated,
+      });
+    }
+
+    if (toolResults.length > 0) {
+      messages.push({ role: 'user', content: toolResults });
+    }
+  }
+
+  throw new Error('Exploration agent hit turn limit without submitting a report');
+}
+
 // ── Claude API (non-streaming, with tool use + retry) ─────
 async function callClaudeWithTools(apiKey, model, system, messages, tools, signal, maxTokens = MAX_TOKENS_DEFAULT) {
   for (let attempt = 0; attempt <= MAX_API_RETRIES; attempt++) {
