@@ -17,6 +17,41 @@
       "East",
       "West"
     ],
-    "profit_is_sales_minus_expenses": true
+    "profit_is_sales_minus_expenses": true,
+    "regional_totals": [
+      {
+        "region": "North",
+        "values": {
+          "Sales": 100000,
+          "Expenses": 70000,
+          "Profit": 30000
+        }
+      },
+      {
+        "region": "South",
+        "values": {
+          "Sales": 200000,
+          "Expenses": 140000,
+          "Profit": 60000
+        }
+      },
+      {
+        "region": "East",
+        "values": {
+          "Sales": 300000,
+          "Expenses": 210000,
+          "Profit": 90000
+        }
+      },
+      {
+        "region": "West",
+        "values": {
+          "Sales": 400000,
+          "Expenses": 280000,
+          "Profit": 120000
+        }
+      }
+    ],
+    "has_bold_headers": true
   }
 }

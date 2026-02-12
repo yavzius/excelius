@@ -12,6 +12,11 @@
   ],
   "checks": {
     "only_category": "Revenue",
-    "all_amounts_positive": true
+    "all_amounts_positive": true,
+    "column_sum": {
+      "Amount": 73500
+    },
+    "has_bold_headers": true,
+    "has_number_format": true
   }
 }

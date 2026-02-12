@@ -15,6 +15,60 @@
   ],
   "checks": {
     "join_key": "AccountID",
-    "all_accounts_present": true
+    "all_accounts_present": true,
+    "expected_keys": [
+      "ACC-001",
+      "ACC-002",
+      "ACC-003",
+      "ACC-004",
+      "ACC-005",
+      "ACC-006",
+      "ACC-007",
+      "ACC-008",
+      "ACC-009",
+      "ACC-010",
+      "ACC-011",
+      "ACC-012",
+      "ACC-013",
+      "ACC-014",
+      "ACC-015",
+      "ACC-016",
+      "ACC-017",
+      "ACC-018",
+      "ACC-019",
+      "ACC-020"
+    ],
+    "column_sum": {
+      "Debit": 210000,
+      "Credit": 168000
+    },
+    "spot_values": [
+      {
+        "data_row": 0,
+        "col": "AccountID",
+        "value": "ACC-001"
+      },
+      {
+        "data_row": 0,
+        "col": "Debit",
+        "value": 1000
+      },
+      {
+        "data_row": 0,
+        "col": "Credit",
+        "value": 800
+      },
+      {
+        "data_row": 19,
+        "col": "AccountID",
+        "value": "ACC-020"
+      },
+      {
+        "data_row": 19,
+        "col": "Debit",
+        "value": 20000
+      }
+    ],
+    "has_bold_headers": true
   }
 }

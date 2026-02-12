@@ -12,6 +12,10 @@
   ],
   "checks": {
     "has_total_row": true,
+    "total_row_values": {
+      "Units": 550,
+      "Revenue": 98175
+    },
     "has_bold_headers": true,
     "has_number_format": true
   }
