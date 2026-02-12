@@ -1,0 +1,20 @@
+{
+  "prompt": "Merge these files by AccountID. Include all columns from both files. Bold the headers.",
+  "sheets": [
+    "Merged"
+  ],
+  "min_rows": 20,
+  "required_columns": [
+    "AccountID",
+    "Name",
+    "Type",
+    "Status",
+    "Debit",
+    "Credit",
+    "Period"
+  ],
+  "checks": {
+    "join_key": "AccountID",
+    "all_accounts_present": true
+  }
+}

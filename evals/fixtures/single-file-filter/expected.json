@@ -1,0 +1,17 @@
+{
+  "prompt": "Filter to only Revenue transactions. Calculate the total revenue. Bold headers and format amounts as currency.",
+  "sheets": [
+    "Revenue"
+  ],
+  "min_rows": 15,
+  "required_columns": [
+    "Date",
+    "Description",
+    "Amount",
+    "Category"
+  ],
+  "checks": {
+    "only_category": "Revenue",
+    "all_amounts_positive": true
+  }
+}

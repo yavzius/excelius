@@ -1,0 +1,22 @@
+{
+  "prompt": "Aggregate all 4 quarterly sheets into a single summary. Sum Sales and Expenses by Region across all quarters. Add a Profit column (Sales - Expenses). Bold headers.",
+  "sheets": [
+    "Summary"
+  ],
+  "min_rows": 4,
+  "required_columns": [
+    "Region",
+    "Sales",
+    "Expenses",
+    "Profit"
+  ],
+  "checks": {
+    "regions": [
+      "North",
+      "South",
+      "East",
+      "West"
+    ],
+    "profit_is_sales_minus_expenses": true
+  }
+}

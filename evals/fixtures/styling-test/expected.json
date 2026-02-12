@@ -1,0 +1,18 @@
+{
+  "prompt": "Create a styled summary: bold headers, currency format on Price and Revenue columns, add a Total row at the bottom that sums Units, Price (average), and Revenue.",
+  "sheets": [
+    "Products"
+  ],
+  "min_rows": 11,
+  "required_columns": [
+    "Product",
+    "Units",
+    "Price",
+    "Revenue"
+  ],
+  "checks": {
+    "has_total_row": true,
+    "has_bold_headers": true,
+    "has_number_format": true
+  }
+}
