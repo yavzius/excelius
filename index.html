@@ -3,225 +3,891 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <!-- CSP: restrict scripts to self + SheetJS CDN, connections to API + CDNs, blob: frames for sandboxed execution -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://cdn.sheetjs.com; connect-src https://api.anthropic.com https://cdn.sheetjs.com https://cdnjs.cloudflare.com; style-src 'unsafe-inline'; frame-src blob:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://cdn.sheetjs.com; connect-src https://api.anthropic.com https://cdn.sheetjs.com https://cdnjs.cloudflare.com; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; frame-src blob:;">
   <title>Excelius</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: #0a0a0a; color: #e0e0e0;
-      padding: 2rem; line-height: 1.5;
-    }
-    .container { max-width: 1100px; margin: 0 auto; }
-    h1 { font-size: 1.3rem; color: #fff; margin-bottom: 0.25rem; }
-    .subtitle { font-size: 0.8rem; color: #666; margin-bottom: 1.5rem; }
+    /* ── Reset & Variables ──────────────────────────────── */
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
-    /* Utility */
+    :root {
+      --bg-0: #060a11;
+      --bg-1: #0a1018;
+      --bg-2: #0f1724;
+      --bg-3: #162030;
+      --bg-4: #1c2a3e;
+      --border-0: #121c2a;
+      --border-1: #1a2840;
+      --border-2: #243752;
+      --text-1: #dce4ed;
+      --text-2: #7a8fa6;
+      --text-3: #3e5570;
+      --gold: #d4a021;
+      --gold-bright: #e8b83a;
+      --gold-dim: rgba(212, 160, 33, 0.10);
+      --gold-glow: rgba(212, 160, 33, 0.25);
+      --teal: #20b298;
+      --teal-dim: rgba(29, 184, 154, 0.10);
+      --red: #d94848;
+      --red-dim: rgba(217, 72, 72, 0.10);
+      --orange: #d98a38;
+      --font-display: 'Cormorant Garamond', 'Georgia', 'Times New Roman', serif;
+      --font-body: 'Manrope', 'Segoe UI', system-ui, sans-serif;
+      --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
+    }
+
+    /* ── Base ───────────────────────────────────────────── */
+    body {
+      font-family: var(--font-body);
+      background: var(--bg-0);
+      color: var(--text-1);
+      line-height: 1.55;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* Subtle dot grid texture */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: radial-gradient(circle at 1px 1px, rgba(255,255,255,0.018) 1px, transparent 0);
+      background-size: 28px 28px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Utility ───────────────────────────────────────── */
     .visually-hidden {
       position: absolute; width: 1px; height: 1px;
       padding: 0; margin: -1px; overflow: hidden;
       clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
     }
 
-    /* API Key */
-    .api-key-row {
-      display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem;
+    /* ── App Shell ─────────────────────────────────────── */
+    .app {
+      position: relative;
+      z-index: 1;
+      max-width: 1140px;
+      margin: 0 auto;
+      padding: 1.75rem 2.25rem 3rem;
+      animation: fadeIn 0.6s ease-out;
     }
-    .api-key-row label { font-size: 0.85rem; color: #888; white-space: nowrap; }
-    .api-key-row input {
-      flex: 1; padding: 0.5rem 0.75rem; background: #1a1a1a;
-      border: 1px solid #333; border-radius: 4px; color: #e0e0e0;
-      font-size: 0.85rem; font-family: monospace;
-    }
-    .api-key-row input:focus { outline: 2px solid #4a9; outline-offset: 1px; border-color: #555; }
 
-    /* Drop Zone */
-    .drop-zone {
-      border: 2px dashed #333; border-radius: 8px; padding: 2rem;
-      text-align: center; cursor: pointer; transition: border-color 0.2s;
-      margin-bottom: 1rem;
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
     }
-    .drop-zone:focus-visible { outline: 2px solid #4a9; outline-offset: 2px; }
-    .drop-zone.dragover { border-color: #4a9; background: rgba(68,170,153,0.05); }
-    .drop-zone p { color: #666; font-size: 0.9rem; }
-    .drop-zone .hint { font-size: 0.75rem; color: #444; margin-top: 0.25rem; }
 
-    /* File List */
-    .file-list { margin-bottom: 1rem; }
-    .file-item {
-      padding: 0.5rem 0.75rem; background: #111; border: 1px solid #222;
-      border-radius: 4px; margin-bottom: 0.5rem; font-size: 0.8rem;
+    /* ── Header ────────────────────────────────────────── */
+    .app-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      padding-bottom: 1.5rem;
+      margin-bottom: 1.75rem;
+      border-bottom: 1px solid var(--border-0);
     }
-    .file-item.generated { border-color: #335; }
-    .file-item-top {
-      display: flex; justify-content: space-between; align-items: center;
-    }
-    .file-item .name { color: #4a9; font-family: monospace; }
-    .file-item .badge {
-      font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 3px;
-      margin-left: 0.5rem; vertical-align: middle;
-    }
-    .badge-generated { background: #1a2a3a; color: #68b; border: 1px solid #335; }
-    .file-item .remove {
-      color: #666; cursor: pointer; padding: 0 0.25rem;
-      border: none; background: none; font-size: 1rem;
-    }
-    .file-item .remove:hover { color: #e55; }
-    .sheet-summary { margin-top: 0.4rem; color: #888; font-size: 0.75rem; }
 
-    /* Prompt */
-    .prompt-area { margin-bottom: 1rem; }
-    .prompt-area textarea {
-      width: 100%; height: 100px; padding: 0.75rem;
-      background: #1a1a1a; color: #e0e0e0; border: 1px solid #333;
-      border-radius: 6px; font-size: 0.9rem; resize: vertical;
+    .logo {
+      display: flex;
+      align-items: baseline;
+      gap: 0.6rem;
     }
-    .prompt-area textarea:focus { outline: 2px solid #4a9; outline-offset: 1px; border-color: #555; }
-    .prompt-area textarea::placeholder { color: #555; }
 
-    /* Controls */
-    .controls { display: flex; gap: 0.5rem; margin-bottom: 1rem; align-items: center; }
-    button {
-      padding: 0.5rem 1.25rem; border: 1px solid #333; border-radius: 4px;
-      background: #1a1a1a; color: #e0e0e0; cursor: pointer; font-size: 0.85rem;
+    .logo-mark {
+      color: var(--gold);
+      font-size: 1.1rem;
+      line-height: 1;
+      opacity: 0.9;
     }
-    button:hover { background: #2a2a2a; }
-    button:disabled { opacity: 0.4; cursor: not-allowed; }
-    button:focus-visible { outline: 2px solid #4a9; outline-offset: 2px; }
-    .btn-run { border-color: #4a9; color: #4a9; font-weight: 600; }
-    .btn-run:hover:not(:disabled) { background: rgba(68,170,153,0.1); }
-    .btn-cancel { border-color: #e55; color: #e55; }
-    .btn-cancel:hover:not(:disabled) { background: rgba(238,85,85,0.1); }
-    .btn-download { border-color: #68b; color: #68b; }
-    .btn-download:hover { background: rgba(102,136,187,0.1); }
-    .status { font-size: 0.8rem; color: #666; margin-left: 0.5rem; }
-    .tokens { font-size: 0.7rem; color: #555; font-family: monospace; }
-    .spacer { flex: 1; }
 
-    /* Output Panels */
-    .panels {
-      display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;
-      margin-bottom: 1rem;
+    .logo h1 {
+      font-family: var(--font-display);
+      font-weight: 600;
+      font-size: 1.65rem;
+      color: var(--text-1);
+      letter-spacing: 0.01em;
     }
-    .panel {
-      background: #111; border: 1px solid #222; border-radius: 6px;
-      overflow: hidden; display: flex; flex-direction: column;
-    }
-    .panel-header {
-      padding: 0.4rem 0.75rem; background: #1a1a1a;
-      border-bottom: 1px solid #222; font-size: 0.75rem;
-      color: #666; text-transform: uppercase; letter-spacing: 0.05em;
-      display: flex; gap: 0;
-    }
-    .panel-tab {
-      padding: 0.4rem 0.75rem; cursor: pointer; border: none;
-      background: none; color: #555; font-size: 0.75rem;
-      text-transform: uppercase; letter-spacing: 0.05em;
-    }
-    .panel-tab:hover { color: #888; }
-    .panel-tab:focus-visible { outline: 2px solid #4a9; outline-offset: -2px; }
-    .panel-tab.active { color: #e0e0e0; border-bottom: 1px solid #4a9; }
-    .panel-body {
-      padding: 0.75rem; font-family: 'SF Mono', 'Cascadia Code', 'Consolas', 'Fira Code', monospace;
-      font-size: 0.8rem; white-space: pre-wrap; overflow-y: auto;
-      max-height: 400px; min-height: 200px; flex: 1;
-    }
-    .panel-body.hidden { display: none; }
 
-    /* Preview Table */
-    .preview-wrap { overflow: auto; max-height: 400px; min-height: 200px; flex: 1; }
-    .preview-table {
-      width: 100%; border-collapse: collapse; font-size: 0.7rem;
-      font-family: 'SF Mono', 'Cascadia Code', 'Consolas', 'Fira Code', monospace;
+    .logo .tagline {
+      font-size: 0.72rem;
+      color: var(--text-3);
+      margin-left: 1rem;
+      font-weight: 400;
+      letter-spacing: 0.02em;
     }
-    .preview-table th, .preview-table td {
-      padding: 0.25rem 0.5rem; border: 1px solid #2a2a2a;
-      white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis;
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
     }
-    .preview-table th {
-      background: #1a1a1a; color: #888; position: sticky; top: 0;
+
+    .api-key-compact {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .api-key-compact label {
+      font-size: 0.7rem;
+      color: var(--text-3);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
       font-weight: 600;
     }
-    .preview-table td { color: #ccc; }
-    .preview-table tr:hover td { background: #1a1a1a; }
-    .preview-empty {
-      color: #555; font-size: 0.8rem; padding: 2rem;
-      text-align: center; font-style: italic;
+
+    .api-key-compact input {
+      width: 200px;
+      padding: 0.35rem 0.6rem;
+      background: var(--bg-2);
+      border: 1px solid var(--border-0);
+      border-radius: var(--radius-sm);
+      color: var(--text-2);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      transition: border-color 0.2s, box-shadow 0.2s;
     }
 
-    /* Log colors */
-    .log-info { color: #aaa; }
-    .log-warn { color: #e95; }
-    .log-error { color: #e55; }
-    .log-success { color: #4a9; }
-    .log-meta { color: #666; font-style: italic; }
+    .api-key-compact input:focus {
+      outline: none;
+      border-color: var(--gold);
+      box-shadow: 0 0 0 3px var(--gold-dim);
+    }
 
-    @media (max-width: 768px) {
+    .tokens {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      color: var(--text-3);
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+
+    /* ── Section Spacing ───────────────────────────────── */
+    .section { margin-bottom: 1.25rem; }
+
+    .section-label {
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-3);
+      font-weight: 600;
+      margin-bottom: 0.6rem;
+    }
+
+    /* ── File Area ─────────────────────────────────────── */
+    .file-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .file-list:empty { margin-bottom: 0; }
+
+    .file-item {
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+      padding: 0.55rem 0.75rem;
+      background: var(--bg-2);
+      border: 1px solid var(--border-0);
+      border-radius: var(--radius-sm);
+      font-size: 0.78rem;
+      transition: border-color 0.2s, background 0.2s;
+      min-width: 180px;
+      position: relative;
+      animation: slideIn 0.25s ease-out;
+    }
+
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateX(-8px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+
+    .file-item:hover {
+      border-color: var(--border-1);
+      background: var(--bg-3);
+    }
+
+    .file-item.generated {
+      border-color: rgba(29, 184, 154, 0.2);
+      background: rgba(29, 184, 154, 0.03);
+    }
+
+    .file-item-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .file-item .name {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--gold);
+      font-weight: 500;
+    }
+
+    .file-item .badge {
+      font-size: 0.58rem;
+      padding: 0.1rem 0.35rem;
+      border-radius: 3px;
+      margin-left: 0.4rem;
+      vertical-align: middle;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .badge-generated {
+      background: var(--teal-dim);
+      color: var(--teal);
+      border: 1px solid rgba(29, 184, 154, 0.2);
+    }
+
+    .file-item .remove {
+      color: var(--text-3);
+      cursor: pointer;
+      padding: 0 0.2rem;
+      border: none;
+      background: none;
+      font-size: 0.9rem;
+      transition: color 0.15s;
+      line-height: 1;
+    }
+
+    .file-item .remove:hover { color: var(--red); }
+
+    .sheet-summary {
+      color: var(--text-3);
+      font-size: 0.68rem;
+      font-family: var(--font-mono);
+    }
+
+    /* ── Drop Zone ─────────────────────────────────────── */
+    .drop-zone {
+      border: 1.5px dashed var(--border-1);
+      border-radius: var(--radius-md);
+      padding: 1.75rem 2rem;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .drop-zone::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(135deg, var(--gold-dim) 0%, transparent 50%, var(--teal-dim) 100%);
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .drop-zone:hover::before,
+    .drop-zone.dragover::before { opacity: 1; }
+
+    .drop-zone:hover {
+      border-color: var(--gold);
+      border-style: solid;
+    }
+
+    .drop-zone.dragover {
+      border-color: var(--gold);
+      border-style: solid;
+      box-shadow: inset 0 0 30px var(--gold-dim), 0 0 20px var(--gold-dim);
+    }
+
+    .drop-zone:focus-visible {
+      outline: 2px solid var(--gold);
+      outline-offset: 2px;
+    }
+
+    .drop-zone-content { position: relative; z-index: 1; }
+
+    .drop-zone-icon {
+      font-size: 1.5rem;
+      margin-bottom: 0.4rem;
+      opacity: 0.4;
+    }
+
+    .drop-zone p {
+      color: var(--text-2);
+      font-size: 0.82rem;
+      font-weight: 500;
+    }
+
+    .drop-zone .hint {
+      font-size: 0.68rem;
+      color: var(--text-3);
+      margin-top: 0.35rem;
+      max-width: 420px;
+      margin-left: auto;
+      margin-right: auto;
+      line-height: 1.5;
+    }
+
+    /* Compact when files present */
+    .file-list:not(:empty) ~ .drop-zone {
+      padding: 0.8rem 1.25rem;
+      border-style: dashed;
+    }
+
+    .file-list:not(:empty) ~ .drop-zone .drop-zone-icon { display: none; }
+    .file-list:not(:empty) ~ .drop-zone .hint { display: none; }
+    .file-list:not(:empty) ~ .drop-zone p { font-size: 0.72rem; color: var(--text-3); }
+
+    /* ── Prompt Area ───────────────────────────────────── */
+    .prompt-wrap {
+      position: relative;
+      border: 1px solid var(--border-0);
+      border-radius: var(--radius-md);
+      background: var(--bg-2);
+      transition: border-color 0.2s, box-shadow 0.2s;
+      overflow: hidden;
+    }
+
+    .prompt-wrap:focus-within {
+      border-color: var(--gold);
+      box-shadow: 0 0 0 3px var(--gold-dim);
+    }
+
+    .prompt-wrap textarea {
+      width: 100%;
+      min-height: 90px;
+      padding: 0.85rem 1rem;
+      padding-bottom: 3rem;
+      background: transparent;
+      color: var(--text-1);
+      border: none;
+      font-family: var(--font-body);
+      font-size: 0.88rem;
+      line-height: 1.55;
+      resize: vertical;
+    }
+
+    .prompt-wrap textarea:focus { outline: none; }
+    .prompt-wrap textarea::placeholder { color: var(--text-3); }
+
+    .prompt-actions {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      display: flex;
+      align-items: center;
+      padding: 0.5rem 0.75rem;
+      gap: 0.5rem;
+    }
+
+    .status {
+      font-size: 0.73rem;
+      color: var(--text-3);
+      font-family: var(--font-mono);
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* ── Buttons ───────────────────────────────────────── */
+    button {
+      font-family: var(--font-body);
+      font-size: 0.78rem;
+      font-weight: 600;
+      padding: 0.4rem 1rem;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-1);
+      background: var(--bg-3);
+      color: var(--text-2);
+      cursor: pointer;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+
+    button:hover { background: var(--bg-4); color: var(--text-1); }
+    button:disabled { opacity: 0.35; cursor: not-allowed; }
+    button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+    .btn-run {
+      background: var(--gold);
+      color: var(--bg-0);
+      border-color: var(--gold);
+      padding: 0.4rem 1.25rem;
+      letter-spacing: 0.02em;
+    }
+
+    .btn-run:hover:not(:disabled) {
+      background: var(--gold-bright);
+      border-color: var(--gold-bright);
+      box-shadow: 0 0 16px var(--gold-dim);
+    }
+
+    .btn-run:disabled {
+      background: var(--bg-3);
+      color: var(--text-3);
+      border-color: var(--border-1);
+    }
+
+    .btn-run .shortcut {
+      font-size: 0.62rem;
+      opacity: 0.6;
+      margin-left: 0.4rem;
+      font-weight: 400;
+      font-family: var(--font-mono);
+    }
+
+    .btn-cancel {
+      border-color: var(--red);
+      color: var(--red);
+      background: var(--red-dim);
+    }
+
+    .btn-cancel:hover:not(:disabled) {
+      background: rgba(217, 72, 72, 0.2);
+    }
+
+    .btn-download {
+      font-size: 0.7rem;
+      padding: 0.3rem 0.7rem;
+      border-color: var(--teal);
+      color: var(--teal);
+      background: var(--teal-dim);
+    }
+
+    .btn-download:hover { background: rgba(29, 184, 154, 0.2); }
+
+    /* ── Pipeline Visualization ─────────────────────────── */
+    .pipeline {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0;
+      padding: 1rem 1.5rem;
+      background: var(--bg-1);
+      border: 1px solid var(--border-0);
+      border-radius: var(--radius-md);
+      overflow: hidden;
+    }
+
+    .pipeline-step {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.3rem;
+      min-width: 80px;
+      position: relative;
+    }
+
+    .step-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      border: 2px solid var(--border-2);
+      background: var(--bg-1);
+      transition: all 0.4s ease;
+      position: relative;
+    }
+
+    .step-label {
+      font-size: 0.68rem;
+      font-weight: 600;
+      color: var(--text-3);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      transition: color 0.4s;
+    }
+
+    .step-model {
+      font-size: 0.6rem;
+      color: var(--text-3);
+      font-family: var(--font-mono);
+      opacity: 0.5;
+      transition: opacity 0.4s, color 0.4s;
+    }
+
+    .pipeline-connector {
+      flex: 1;
+      height: 2px;
+      background: var(--border-0);
+      margin: 0 0.25rem;
+      margin-bottom: 2rem;
+      position: relative;
+      min-width: 40px;
+      max-width: 120px;
+      overflow: hidden;
+    }
+
+    .pipeline-connector::after {
+      content: '';
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 0%;
+      background: var(--gold);
+      transition: width 0.6s ease;
+    }
+
+    /* Pipeline States — driven by data-phase on #pipelineViz */
+
+    /* Exploring */
+    .pipeline[data-phase="exploring"] [data-step="explore"] .step-dot {
+      border-color: var(--gold);
+      background: var(--gold);
+      box-shadow: 0 0 10px var(--gold-glow);
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    .pipeline[data-phase="exploring"] [data-step="explore"] .step-label { color: var(--gold); }
+    .pipeline[data-phase="exploring"] [data-step="explore"] .step-model { opacity: 1; color: var(--text-2); }
+
+    /* Codegen */
+    .pipeline[data-phase="codegen"] [data-step="explore"] .step-dot,
+    .pipeline[data-phase="codegen"] [data-step="report"] .step-dot {
+      border-color: var(--teal);
+      background: var(--teal);
+    }
+    .pipeline[data-phase="codegen"] [data-step="explore"] .step-label,
+    .pipeline[data-phase="codegen"] [data-step="report"] .step-label { color: var(--teal); }
+    .pipeline[data-phase="codegen"] [data-step="explore"] .step-model,
+    .pipeline[data-phase="codegen"] [data-step="report"] .step-model { opacity: 0.7; color: var(--teal); }
+
+    .pipeline[data-phase="codegen"] .pipeline-connector:nth-of-type(1)::after,
+    .pipeline[data-phase="codegen"] .pipeline-connector:nth-of-type(2)::after { width: 100%; }
+
+    .pipeline[data-phase="codegen"] [data-step="codegen"] .step-dot {
+      border-color: var(--gold);
+      background: var(--gold);
+      box-shadow: 0 0 10px var(--gold-glow);
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    .pipeline[data-phase="codegen"] [data-step="codegen"] .step-label { color: var(--gold); }
+    .pipeline[data-phase="codegen"] [data-step="codegen"] .step-model { opacity: 1; color: var(--text-2); }
+
+    /* Done */
+    .pipeline[data-phase="done"] .step-dot {
+      border-color: var(--teal);
+      background: var(--teal);
+    }
+    .pipeline[data-phase="done"] .step-label { color: var(--teal); }
+    .pipeline[data-phase="done"] .step-model { opacity: 0.7; color: var(--teal); }
+    .pipeline[data-phase="done"] .pipeline-connector::after {
+      width: 100%;
+      background: var(--teal);
+    }
+
+    /* Error */
+    .pipeline[data-phase="error"] [data-step].was-active .step-dot {
+      border-color: var(--red);
+      background: var(--red);
+    }
+
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 8px var(--gold-glow); }
+      50% { box-shadow: 0 0 18px var(--gold-glow), 0 0 30px rgba(212, 160, 33, 0.1); }
+    }
+
+    /* ── Output Panels ─────────────────────────────────── */
+    .panels {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+
+    .panel {
+      background: var(--bg-1);
+      border: 1px solid var(--border-0);
+      border-radius: var(--radius-md);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      padding: 0 0.5rem;
+      background: var(--bg-2);
+      border-bottom: 1px solid var(--border-0);
+      min-height: 36px;
+    }
+
+    .panel-tab {
+      padding: 0.5rem 0.75rem;
+      border: none;
+      background: none;
+      font-family: var(--font-body);
+      font-size: 0.68rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-3);
+      cursor: pointer;
+      position: relative;
+      transition: color 0.15s;
+    }
+
+    .panel-tab:hover { color: var(--text-2); }
+    .panel-tab:focus-visible { outline: 2px solid var(--gold); outline-offset: -2px; }
+
+    .panel-tab.active { color: var(--text-1); }
+    .panel-tab.active::after {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 0.75rem;
+      right: 0.75rem;
+      height: 2px;
+      background: var(--gold);
+      border-radius: 1px;
+    }
+
+    .panel-header-label {
+      padding: 0.5rem 0.75rem;
+      font-size: 0.68rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-3);
+    }
+
+    .spacer { flex: 1; }
+
+    .panel-body {
+      padding: 0.75rem;
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      line-height: 1.65;
+      white-space: pre-wrap;
+      overflow-y: auto;
+      max-height: 420px;
+      min-height: 220px;
+      flex: 1;
+      color: var(--text-2);
+    }
+
+    .panel-body.hidden, .preview-wrap.hidden { display: none; }
+
+    .panel-body::-webkit-scrollbar { width: 6px; }
+    .panel-body::-webkit-scrollbar-track { background: transparent; }
+    .panel-body::-webkit-scrollbar-thumb { background: var(--border-1); border-radius: 3px; }
+    .panel-body::-webkit-scrollbar-thumb:hover { background: var(--border-2); }
+
+    /* ── Preview Table ─────────────────────────────────── */
+    .preview-wrap {
+      overflow: auto;
+      max-height: 420px;
+      min-height: 220px;
+      flex: 1;
+    }
+
+    .preview-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.7rem;
+      font-family: var(--font-mono);
+    }
+
+    .preview-table th, .preview-table td {
+      padding: 0.3rem 0.6rem;
+      border: 1px solid var(--border-0);
+      white-space: nowrap;
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .preview-table th {
+      background: var(--bg-3);
+      color: var(--gold);
+      font-weight: 500;
+      position: sticky;
+      top: 0;
+      font-size: 0.66rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .preview-table td { color: var(--text-2); }
+    .preview-table tr:hover td { background: var(--bg-2); }
+
+    .preview-table tr:nth-child(even) td { background: rgba(255,255,255,0.01); }
+    .preview-table tr:nth-child(even):hover td { background: var(--bg-2); }
+
+    .preview-empty {
+      color: var(--text-3);
+      font-size: 0.78rem;
+      font-family: var(--font-body);
+      padding: 3rem 2rem;
+      text-align: center;
+    }
+
+    /* ── Log Styling ───────────────────────────────────── */
+    .log-info { color: var(--text-2); }
+    .log-warn { color: var(--orange); }
+    .log-error { color: var(--red); }
+    .log-meta { color: var(--text-3); font-style: italic; }
+
+    .log-success {
+      color: var(--teal);
+      font-weight: 500;
+      padding: 0.3rem 0;
+      letter-spacing: 0.02em;
+    }
+
+    #logPanel > div {
+      padding: 0.15rem 0;
+      border-bottom: 1px solid rgba(255,255,255,0.015);
+      animation: logFade 0.2s ease-out;
+    }
+
+    @keyframes logFade {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── Running State ─────────────────────────────────── */
+    body.running .btn-run {
+      background: var(--bg-3);
+      color: var(--text-3);
+      border-color: var(--border-1);
+    }
+
+    body.running .prompt-wrap {
+      border-color: var(--gold);
+      box-shadow: 0 0 0 1px var(--gold-dim);
+    }
+
+    /* ── Responsive ────────────────────────────────────── */
+    @media (max-width: 860px) {
+      .app { padding: 1rem 1.25rem 2rem; }
+      .app-header { flex-direction: column; gap: 0.75rem; align-items: flex-start; }
+      .header-right { width: 100%; }
+      .api-key-compact input { flex: 1; width: auto; }
       .panels { grid-template-columns: 1fr; }
-      body { padding: 1rem; }
+      .pipeline { flex-wrap: wrap; gap: 0.5rem; padding: 0.75rem; }
+      .pipeline-connector { display: none; }
+    }
+
+    @media (max-width: 480px) {
+      .file-list { flex-direction: column; }
+      .file-item { min-width: 0; }
     }
   </style>
 </head>
 <body>
-  <main class="container">
-    <header>
-      <h1>Excelius</h1>
-      <p class="subtitle">Drop files, describe what you want, get a styled output. Iterate. All data stays local.</p>
+  <div class="app">
+
+    <!-- Header -->
+    <header class="app-header">
+      <div class="logo">
+        <span class="logo-mark">&#9670;</span>
+        <h1>Excelius</h1>
+        <span class="tagline">Two-agent Excel pipeline</span>
+      </div>
+      <div class="header-right">
+        <div class="api-key-compact">
+          <label for="apiKey">Key</label>
+          <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off">
+        </div>
+        <span class="tokens" id="tokenCounter"></span>
+      </div>
     </header>
 
-    <section aria-label="Configuration">
-      <div class="api-key-row">
-        <label for="apiKey">API Key</label>
-        <input type="password" id="apiKey" placeholder="sk-ant-...">
-      </div>
-    </section>
+    <main>
 
-    <section aria-label="File upload">
-      <div class="drop-zone" id="dropZone" role="button" tabindex="0"
-           aria-label="Upload Excel files. Drop files here or press Enter to browse.">
-        <p>Drop .xlsx files here or click to browse</p>
-        <p class="hint">Your files stay local. Claude sees row samples and column stats to understand structure — not full datasets.</p>
-        <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.csv" hidden>
-      </div>
-      <div class="file-list" id="fileList" aria-label="Uploaded files"></div>
-    </section>
-
-    <section aria-label="Prompt">
-      <div class="prompt-area">
-        <label for="prompt" class="visually-hidden">Describe what you want done with these files</label>
-        <textarea id="prompt" placeholder="Describe what you want done with these files...&#10;&#10;Example: Merge these by account, sum Q1 columns, bold headers.&#10;After output: Now add a percentage column and format as currency."></textarea>
-      </div>
-
-      <div class="controls">
-        <button class="btn-run" id="runBtn" disabled>Run</button>
-        <button class="btn-cancel" id="cancelBtn" hidden>Cancel</button>
-        <span class="status" id="status"></span>
-        <span class="tokens" id="tokenCounter"></span>
-        <span class="spacer"></span>
-        <button class="btn-download" id="downloadBtn" hidden>Download Output</button>
-      </div>
-    </section>
-
-    <section aria-label="Output">
-      <div class="panels">
-        <div class="panel">
-          <div class="panel-header" role="tablist">
-            <button class="panel-tab active" data-tab="code" role="tab" aria-selected="true">Code</button>
-            <button class="panel-tab" data-tab="preview" role="tab" aria-selected="false">Preview</button>
+      <!-- Files -->
+      <section class="section" aria-label="Files">
+        <div class="section-label">Files</div>
+        <div class="file-list" id="fileList" aria-label="Uploaded files"></div>
+        <div class="drop-zone" id="dropZone" role="button" tabindex="0"
+             aria-label="Upload Excel files. Drop files here or press Enter to browse.">
+          <div class="drop-zone-content">
+            <div class="drop-zone-icon">&#9638;</div>
+            <p>Drop .xlsx files here or click to browse</p>
+            <p class="hint">Your files stay local. Claude sees row samples and column stats to understand structure.</p>
           </div>
-          <div class="panel-body" id="codePanel" role="tabpanel">Waiting for code generation...</div>
-          <div class="preview-wrap hidden" id="previewPanel" role="tabpanel">
-            <div class="preview-empty">Output preview will appear here</div>
+          <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.csv" hidden>
+        </div>
+      </section>
+
+      <!-- Prompt -->
+      <section class="section" aria-label="Prompt">
+        <div class="section-label">Prompt</div>
+        <div class="prompt-wrap">
+          <label for="prompt" class="visually-hidden">Describe what you want done with these files</label>
+          <textarea id="prompt" placeholder="Describe what you want done with these files...&#10;&#10;Example: Merge these by account ID, sum the debit/credit columns, bold headers.&#10;After output: Now add a net balance column and format as currency."></textarea>
+          <div class="prompt-actions">
+            <span class="status" id="status"></span>
+            <button class="btn-cancel" id="cancelBtn" hidden>Cancel</button>
+            <button class="btn-run" id="runBtn" disabled>Run <span class="shortcut">&#8984;&#9166;</span></button>
           </div>
         </div>
-        <div class="panel">
-          <div class="panel-header">Log</div>
-          <div class="panel-body" id="logPanel">Waiting for agent activity...</div>
+      </section>
+
+      <!-- Pipeline -->
+      <section class="section" aria-label="Pipeline">
+        <div class="pipeline" id="pipelineViz" data-phase="idle">
+          <div class="pipeline-step" data-step="explore">
+            <div class="step-dot"></div>
+            <div class="step-label">Explore</div>
+            <div class="step-model">Haiku 4.5</div>
+          </div>
+          <div class="pipeline-connector"></div>
+          <div class="pipeline-step" data-step="report">
+            <div class="step-dot"></div>
+            <div class="step-label">Report</div>
+            <div class="step-model">structured JSON</div>
+          </div>
+          <div class="pipeline-connector"></div>
+          <div class="pipeline-step" data-step="codegen">
+            <div class="step-dot"></div>
+            <div class="step-label">Generate</div>
+            <div class="step-model">Opus 4.6</div>
+          </div>
+          <div class="pipeline-connector"></div>
+          <div class="pipeline-step" data-step="verify">
+            <div class="step-dot"></div>
+            <div class="step-label">Verify</div>
+            <div class="step-model">sandbox</div>
+          </div>
         </div>
-      </div>
-    </section>
-  </main>
+      </section>
+
+      <!-- Output Panels -->
+      <section aria-label="Output">
+        <div class="panels">
+          <div class="panel">
+            <div class="panel-header" role="tablist">
+              <button class="panel-tab active" data-tab="code" role="tab" aria-selected="true">Code</button>
+              <button class="panel-tab" data-tab="preview" role="tab" aria-selected="false">Preview</button>
+              <span class="spacer"></span>
+              <button class="btn-download" id="downloadBtn" hidden>&#8595; Download</button>
+            </div>
+            <div class="panel-body" id="codePanel" role="tabpanel">Waiting for code generation...</div>
+            <div class="preview-wrap hidden" id="previewPanel" role="tabpanel">
+              <div class="preview-empty">Output preview will appear here</div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-header-label">Log</span>
+            </div>
+            <div class="panel-body" id="logPanel">Waiting for agent activity...</div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
 
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
   <script type="module" src="app.js"></script>

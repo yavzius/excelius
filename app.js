@@ -66,6 +66,7 @@ const $previewPanel = document.getElementById('previewPanel');
 const $cancelBtn = document.getElementById('cancelBtn');
 const $tokenCounter = document.getElementById('tokenCounter');
 const $downloadBtn = document.getElementById('downloadBtn');
+const $pipeline = document.getElementById('pipelineViz');
 
 // ── UI Helpers ────────────────────────────────────────────
 // Escape HTML special characters to prevent XSS in innerHTML contexts
@@ -118,6 +119,10 @@ function updateTokens(phase, usage) {
   updateTokenCounter();
 }
 
+function updatePipeline(phase) {
+  if ($pipeline) $pipeline.dataset.phase = phase;
+}
+
 // ── Panel Tabs ────────────────────────────────────────────
 document.querySelectorAll('.panel-tab').forEach(tab => {
   tab.addEventListener('click', () => switchTab(tab.dataset.tab));
@@ -152,6 +157,12 @@ $dropZone.addEventListener('drop', (e) => {
 });
 
 $prompt.addEventListener('input', updateRunBtn);
+$prompt.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    $runBtn.click();
+  }
+});
 
 function removeGeneratedByName(name) {
   const idx = state.files.findIndex(f => f.name === name && f.generated);
@@ -1128,23 +1139,28 @@ $runBtn.addEventListener('click', async () => {
   state.outputBuffer = null;
   state.outputFilename = null;
   state.running = true;
+  document.body.classList.add('running');
   state.exploreTokens = { input: 0, output: 0 };
   state.codegenTokens = { input: 0, output: 0 };
   state.abortController = new AbortController();
   updateTokenCounter();
+  updatePipeline('idle');
 
   try {
     const signal = state.abortController.signal;
 
     // Phase 1: Explore (Haiku)
+    updatePipeline('exploring');
     logTo($logPanel, `\u2500\u2500 Exploration (Haiku 4.5) ${'─'.repeat(30)}`, 'log-success');
     const report = await runExplorationAgent(apiKey, prompt, signal);
 
     // Phase 2: Generate code (Opus)
+    updatePipeline('codegen');
     logTo($logPanel, `\u2500\u2500 Code Generation (Opus 4.6) ${'─'.repeat(26)}`, 'log-success');
     const result = await runCodeGenAgent(apiKey, prompt, report, signal);
 
     if (result.action === 'success') {
+      updatePipeline('done');
       setStatus('Done \u2014 ask a follow-up or download');
     }
 
@@ -1156,8 +1172,10 @@ $runBtn.addEventListener('click', async () => {
       setStatus('Error');
       logTo($logPanel, `Error: ${err.message}`, 'log-error');
     }
+    updatePipeline('error');
   } finally {
     state.running = false;
+    document.body.classList.remove('running');
     state.abortController = null;
     $cancelBtn.hidden = true;
     updateRunBtn();
