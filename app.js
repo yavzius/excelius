@@ -11,10 +11,6 @@ const MAX_CODE_RETRIES = 3;
 const MAX_TOKENS_DEFAULT = 16384;
 const MAX_TOKENS_EXTENDED = 32768;
 const WORKER_TIMEOUT_MS = 120_000;
-// Leave ~80k tokens of headroom for system prompt, current turn, and response within a 200k context window
-const TOKEN_PRUNE_THRESHOLD = 120_000;
-const PRUNE_KEEP_RECENT = 8;
-const PRUNE_CONTENT_LIMIT = 200;
 const MAX_PREVIEW_ROWS = 50;
 const MAX_READ_ROWS = 50;
 const MAX_UNIQUE_VALUES = 30;
@@ -27,8 +23,8 @@ const state = {
   outputFilename: null,
   abortController: null,
   running: false,
-  totalInputTokens: 0,
-  totalOutputTokens: 0,
+  exploreTokens: { input: 0, output: 0 },
+  codegenTokens: { input: 0, output: 0 },
 };
 
 // ── Workbook Helpers ──────────────────────────────────────
@@ -104,9 +100,22 @@ function switchTab(name) {
 }
 
 function updateTokenCounter() {
-  const total = state.totalInputTokens + state.totalOutputTokens;
+  const ei = state.exploreTokens.input;
+  const eo = state.exploreTokens.output;
+  const ci = state.codegenTokens.input;
+  const co = state.codegenTokens.output;
+  const total = ei + eo + ci + co;
   if (total === 0) { $tokenCounter.textContent = ''; return; }
-  $tokenCounter.textContent = `${(total / 1000).toFixed(1)}k tokens`;
+  const fmtK = n => (n / 1000).toFixed(1) + 'k';
+  $tokenCounter.textContent = `Explore: \u2191${fmtK(ei)} \u2193${fmtK(eo)} | Code: \u2191${fmtK(ci)} \u2193${fmtK(co)}`;
+}
+
+function updateTokens(phase, usage) {
+  if (!usage) return;
+  const t = phase === 'explore' ? state.exploreTokens : state.codegenTokens;
+  t.input += usage.input_tokens || 0;
+  t.output += usage.output_tokens || 0;
+  updateTokenCounter();
 }
 
 // ── Panel Tabs ────────────────────────────────────────────
@@ -823,11 +832,6 @@ async function callClaudeWithTools(apiKey, model, system, messages, tools, signa
         }
         throw new Error(`Claude API returned invalid JSON: ${parseErr.message}`);
       }
-      if (data.usage) {
-        state.totalInputTokens += data.usage.input_tokens || 0;
-        state.totalOutputTokens += data.usage.output_tokens || 0;
-        updateTokenCounter();
-      }
       return data;
     }
 
@@ -1016,27 +1020,6 @@ $downloadBtn.addEventListener('click', () => {
   if (state.outputBuffer) downloadFile(state.outputBuffer, state.outputFilename);
 });
 
-// ── Context Window Management ─────────────────────────────
-function pruneMessages(messages) {
-  // Replace old tool_result content blocks with summaries.
-  // Keep the last few message pairs (most recent context) intact.
-  if (messages.length <= PRUNE_KEEP_RECENT + 1) return false;
-
-  let pruned = false;
-  for (let i = 1; i < messages.length - PRUNE_KEEP_RECENT; i++) {
-    const msg = messages[i];
-    if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
-    msg.content = msg.content.map(block => {
-      if (block.type === 'tool_result' && typeof block.content === 'string' && block.content.length > PRUNE_CONTENT_LIMIT) {
-        pruned = true;
-        return { ...block, content: block.content.slice(0, PRUNE_CONTENT_LIMIT) + '... [pruned for context]' };
-      }
-      return block;
-    });
-  }
-  return pruned;
-}
-
 // ── Code Execution + Verification ─────────────────────────
 // Extracted from the agent loop for clarity. Handles executing LLM-generated
 // code in the sandbox, verifying the output, and returning a structured result.
@@ -1124,7 +1107,7 @@ async function executeGeneratedCode({ id, input, signal }) {
   };
 }
 
-// ── Agent Loop ────────────────────────────────────────────
+// ── Pipeline Coordinator ──────────────────────────────────
 $cancelBtn.addEventListener('click', () => {
   if (state.abortController) {
     state.abortController.abort();
@@ -1145,125 +1128,25 @@ $runBtn.addEventListener('click', async () => {
   state.outputBuffer = null;
   state.outputFilename = null;
   state.running = true;
-  state.totalInputTokens = 0;
-  state.totalOutputTokens = 0;
+  state.exploreTokens = { input: 0, output: 0 };
+  state.codegenTokens = { input: 0, output: 0 };
   state.abortController = new AbortController();
   updateTokenCounter();
 
-  const fileList = state.files.map(f => f.name).join(', ');
-  const messages = [
-    { role: 'user', content: `I have these Excel files: ${fileList}\n\nTask: ${prompt}\n\nPlease explore the files first to understand their structure, then generate the processing code.` },
-  ];
-
   try {
-    let codeRetries = 0;
     const signal = state.abortController.signal;
 
-    for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
-      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    // Phase 1: Explore (Haiku)
+    logTo($logPanel, `\u2500\u2500 Exploration (Haiku 4.5) ${'─'.repeat(30)}`, 'log-success');
+    const report = await runExplorationAgent(apiKey, prompt, signal);
 
-      setStatus(`Agent thinking (turn ${turn + 1})...`);
+    // Phase 2: Generate code (Opus)
+    logTo($logPanel, `\u2500\u2500 Code Generation (Opus 4.6) ${'─'.repeat(26)}`, 'log-success');
+    const result = await runCodeGenAgent(apiKey, prompt, report, signal);
 
-      if (state.totalInputTokens > TOKEN_PRUNE_THRESHOLD && pruneMessages(messages)) {
-        logTo($logPanel, 'Pruned old tool results to manage context window.', 'log-warn');
-      }
-
-      let response = await callClaudeWithTools(apiKey, 'claude-sonnet-4-5-20250929', SYSTEM_PROMPT, messages, TOOLS, signal);
-
-      // Handle max_tokens truncation: if last block is tool_use, retry with higher limit
-      if (response.stop_reason === 'max_tokens') {
-        const last = response.content[response.content.length - 1];
-        if (last?.type === 'tool_use') {
-          logTo($logPanel, 'Response truncated mid-tool-call — retrying with higher limit...', 'log-warn');
-          response = await callClaudeWithTools(apiKey, 'claude-sonnet-4-5-20250929', SYSTEM_PROMPT, messages, TOOLS, signal, MAX_TOKENS_EXTENDED);
-        }
-      }
-
-      const assistantContent = response.content;
-      messages.push({ role: 'assistant', content: assistantContent });
-
-      for (const block of assistantContent) {
-        if (block.type === 'text' && block.text.trim()) {
-          logTo($logPanel, block.text, 'log-meta');
-        }
-      }
-
-      if (response.stop_reason !== 'tool_use') {
-        setStatus('Agent finished without generating code');
-        logTo($logPanel, 'Agent did not produce output code.', 'log-warn');
-        break;
-      }
-
-      // Process tool calls
-      const toolResults = [];
-
-      for (const block of assistantContent) {
-        if (block.type !== 'tool_use') continue;
-        if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-
-        const { id, name, input } = block;
-        const inputStr = JSON.stringify(input);
-        logTo($logPanel, `\u2192 ${name}(${inputStr.slice(0, 100)}${inputStr.length > 100 ? '...' : ''})`, 'log-info');
-
-        // Code generation — handled by extracted function
-        if (name === 'generate_code') {
-          const gen = await executeGeneratedCode({ id, input, signal });
-
-          if (gen.action === 'success') {
-            toolResults.push(gen.toolResult);
-            messages.push({ role: 'user', content: toolResults });
-            return;
-          }
-
-          // Retry path
-          codeRetries++;
-          toolResults.push(gen.toolResult);
-
-          if (codeRetries >= MAX_CODE_RETRIES) {
-            if (gen.buffer) {
-              // Output exists but has issues — offer it anyway
-              state.outputBuffer = gen.buffer;
-              state.outputFilename = gen.filename;
-              $downloadBtn.hidden = false;
-              addGeneratedFile(gen.buffer, gen.filename, gen.verifyWb);
-              showPreview(gen.verifyWb);
-              setStatus('Done (with warnings) — ask a follow-up or download');
-              logTo($logPanel, 'Max retries reached. Output available but may have issues.', 'log-warn');
-            } else {
-              setStatus('Failed');
-              logTo($logPanel, 'Max code retries reached.', 'log-error');
-            }
-            messages.push({ role: 'user', content: toolResults });
-            return;
-          }
-
-          continue;
-        }
-
-        // Regular tool: execute and collect result
-        const result = executeTool(name, input);
-        const resultStr = JSON.stringify(result, null, 2);
-
-        const truncated = resultStr.length > TOOL_RESULT_MAX_CHARS
-          ? resultStr.slice(0, TOOL_RESULT_MAX_CHARS) + `\n... (truncated, ${resultStr.length} chars total)`
-          : resultStr;
-
-        logTo($logPanel, `  \u2190 ${truncated.slice(0, 200)}${truncated.length > 200 ? '...' : ''}`, 'log-info');
-
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: id,
-          content: truncated,
-        });
-      }
-
-      if (toolResults.length > 0) {
-        messages.push({ role: 'user', content: toolResults });
-      }
+    if (result.action === 'success') {
+      setStatus('Done \u2014 ask a follow-up or download');
     }
-
-    setStatus('Max turns reached');
-    logTo($logPanel, 'Agent loop hit turn limit.', 'log-warn');
 
   } catch (err) {
     if (err.name === 'AbortError') {
