@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Excel Agent</title>
+  <title>Excelius</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -43,10 +43,16 @@
       padding: 0.5rem 0.75rem; background: #111; border: 1px solid #222;
       border-radius: 4px; margin-bottom: 0.5rem; font-size: 0.8rem;
     }
+    .file-item.generated { border-color: #335; }
     .file-item-top {
       display: flex; justify-content: space-between; align-items: center;
     }
     .file-item .name { color: #4a9; font-family: monospace; }
+    .file-item .badge {
+      font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 3px;
+      margin-left: 0.5rem; vertical-align: middle;
+    }
+    .badge-generated { background: #1a2a3a; color: #68b; border: 1px solid #335; }
     .file-item .remove {
       color: #666; cursor: pointer; padding: 0 0.25rem;
       border: none; background: none; font-size: 1rem;
@@ -91,11 +97,41 @@
       padding: 0.4rem 0.75rem; background: #1a1a1a;
       border-bottom: 1px solid #222; font-size: 0.75rem;
       color: #666; text-transform: uppercase; letter-spacing: 0.05em;
+      display: flex; gap: 0;
     }
+    .panel-tab {
+      padding: 0.4rem 0.75rem; cursor: pointer; border: none;
+      background: none; color: #555; font-size: 0.75rem;
+      text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .panel-tab:hover { color: #888; }
+    .panel-tab.active { color: #e0e0e0; border-bottom: 1px solid #4a9; }
     .panel-body {
       padding: 0.75rem; font-family: 'SF Mono', 'Fira Code', monospace;
       font-size: 0.8rem; white-space: pre-wrap; overflow-y: auto;
       max-height: 400px; min-height: 200px; flex: 1;
+    }
+    .panel-body.hidden { display: none; }
+
+    /* Preview Table */
+    .preview-wrap { overflow: auto; max-height: 400px; min-height: 200px; flex: 1; }
+    .preview-table {
+      width: 100%; border-collapse: collapse; font-size: 0.7rem;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+    .preview-table th, .preview-table td {
+      padding: 0.25rem 0.5rem; border: 1px solid #2a2a2a;
+      white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis;
+    }
+    .preview-table th {
+      background: #1a1a1a; color: #888; position: sticky; top: 0;
+      font-weight: 600;
+    }
+    .preview-table td { color: #ccc; }
+    .preview-table tr:hover td { background: #1a1a1a; }
+    .preview-empty {
+      color: #555; font-size: 0.8rem; padding: 2rem;
+      text-align: center; font-style: italic;
     }
 
     /* Log colors */
@@ -120,8 +156,8 @@
 </head>
 <body>
   <div class="container">
-    <h1>Excel Agent</h1>
-    <p class="subtitle">Drop files, describe what you want, get a styled output. All data stays local.</p>
+    <h1>Excelius</h1>
+    <p class="subtitle">Drop files, describe what you want, get a styled output. Iterate. All data stays local.</p>
 
     <div class="api-key-row">
       <label for="apiKey">API Key</label>
@@ -137,7 +173,7 @@
     <div class="file-list" id="fileList"></div>
 
     <div class="prompt-area">
-      <textarea id="prompt" placeholder="Describe what you want done with these files...&#10;&#10;Example: Sum January through March for each account and add columns for 2022, 2023, 2024 next to the 2025 data. Bold the headers and format numbers with commas."></textarea>
+      <textarea id="prompt" placeholder="Describe what you want done with these files...&#10;&#10;Example: Merge these by account, sum Q1 columns, bold headers.&#10;After output: Now add a percentage column and format as currency."></textarea>
     </div>
 
     <div class="controls">
@@ -153,8 +189,14 @@
 
     <div class="panels">
       <div class="panel">
-        <div class="panel-header">Code</div>
+        <div class="panel-header">
+          <button class="panel-tab active" data-tab="code">Code</button>
+          <button class="panel-tab" data-tab="preview">Preview</button>
+        </div>
         <div class="panel-body" id="codePanel"></div>
+        <div class="preview-wrap hidden" id="previewPanel">
+          <div class="preview-empty">Output preview will appear here</div>
+        </div>
       </div>
       <div class="panel">
         <div class="panel-header">Log</div>

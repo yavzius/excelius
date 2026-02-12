@@ -1,9 +1,18 @@
 // ── State ──────────────────────────────────────────────────
 const state = {
-  files: [],      // { name, buffer (ArrayBuffer), wb (parsed workbook) }
+  files: [],      // { name, buffer (ArrayBuffer), wb (parsed workbook), generated? }
   outputBuffer: null,
   outputFilename: null,
 };
+
+// Cache: WeakMap<worksheet, rows[]> — avoids re-parsing on every tool call
+const _sheetJsonCache = new WeakMap();
+function getSheetRows(ws) {
+  if (_sheetJsonCache.has(ws)) return _sheetJsonCache.get(ws);
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+  _sheetJsonCache.set(ws, rows);
+  return rows;
+}
 
 // ── DOM refs ───────────────────────────────────────────────
 const $apiKey = document.getElementById('apiKey');
@@ -16,7 +25,19 @@ const $modelSelect = document.getElementById('modelSelect');
 const $status = document.getElementById('status');
 const $codePanel = document.getElementById('codePanel');
 const $logPanel = document.getElementById('logPanel');
+const $previewPanel = document.getElementById('previewPanel');
 const $downloadBtn = document.getElementById('downloadBtn');
+
+// ── Panel Tabs ─────────────────────────────────────────────
+document.querySelectorAll('.panel-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    const show = tab.dataset.tab;
+    $codePanel.classList.toggle('hidden', show !== 'code');
+    $previewPanel.classList.toggle('hidden', show !== 'preview');
+  });
+});
 
 // ── API Key persistence ────────────────────────────────────
 $apiKey.value = localStorage.getItem('excel-agent-api-key') || '';
@@ -87,9 +108,9 @@ function removeFile(index) {
 
 function renderFileList() {
   $fileList.innerHTML = state.files.map((f, i) => `
-    <div class="file-item">
+    <div class="file-item${f.generated ? ' generated' : ''}">
       <div class="file-item-top">
-        <span class="name">${esc(f.name)}</span>
+        <span class="name">${esc(f.name)}${f.generated ? '<span class="badge badge-generated">generated</span>' : ''}</span>
         <button class="remove" data-idx="${i}">&times;</button>
       </div>
       <div class="sheet-summary">${esc(f.summary)}</div>
@@ -100,35 +121,72 @@ function renderFileList() {
   });
 }
 
+function showPreview(buffer) {
+  try {
+    const wb = XLSX.read(buffer, { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+    const maxRows = Math.min(rows.length, 50);
+    if (maxRows === 0) {
+      $previewPanel.innerHTML = '<div class="preview-empty">Output is empty</div>';
+      return;
+    }
+    let html = '<table class="preview-table"><thead><tr>';
+    // Use first row as headers
+    const headers = rows[0] || [];
+    for (const h of headers) html += `<th>${esc(h ?? '')}</th>`;
+    html += '</tr></thead><tbody>';
+    for (let r = 1; r < maxRows; r++) {
+      html += '<tr>';
+      const row = rows[r] || [];
+      for (let c = 0; c < headers.length; c++) {
+        html += `<td>${esc(row[c] ?? '')}</td>`;
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    if (rows.length > 50) html += `<div class="preview-empty">${rows.length - 50} more rows...</div>`;
+    $previewPanel.innerHTML = html;
+  } catch {
+    $previewPanel.innerHTML = '<div class="preview-empty">Could not preview output</div>';
+  }
+}
+
+function addGeneratedFile(buffer, filename) {
+  const wb = XLSX.read(buffer, { type: 'array' });
+  const summary = wb.SheetNames.map(n => {
+    const ws = wb.Sheets[n];
+    const ref = ws['!ref'];
+    if (!ref) return `${n}: empty`;
+    const range = XLSX.utils.decode_range(ref);
+    return `${n} (${range.e.r + 1} rows × ${range.e.c + 1} cols)`;
+  }).join(', ');
+
+  // Remove any previous generated file with the same name
+  const existing = state.files.findIndex(f => f.name === filename && f.generated);
+  if (existing !== -1) state.files.splice(existing, 1);
+
+  state.files.push({ name: filename, buffer, wb, summary, generated: true });
+  renderFileList();
+}
+
 // ── Tool Definitions for Claude ────────────────────────────
 // Claude gets these tools to explore the files before writing code.
 
 function findFile(nameQuery) {
-  return state.files.find(f =>
-    f.name.toLowerCase().includes(nameQuery.toLowerCase())
-  );
+  const q = nameQuery.toLowerCase();
+  // Exact match first, then substring fallback
+  return state.files.find(f => f.name.toLowerCase() === q)
+      || state.files.find(f => f.name.toLowerCase().includes(q));
 }
 
 function getSheet(file, sheetName) {
   const name = sheetName || file.wb.SheetNames[0];
-  return { ws: file.wb.Sheets[name], name };
-}
-
-function excelDateToStr(serial) {
-  const d = new Date((serial - 25569) * 86400000);
-  return (d.getUTCMonth() + 1).toString().padStart(2, '0') + '/' +
-         d.getUTCDate().toString().padStart(2, '0') + '/' +
-         d.getUTCFullYear();
-}
-
-function isDateSerial(v) {
-  return typeof v === 'number' && v > 365 && v < 73415 && Number.isInteger(v);
-}
-
-function formatCellValue(v) {
-  if (v === null || v === undefined) return null;
-  if (typeof v === 'number' && isDateSerial(v)) return excelDateToStr(v);
-  return v;
+  const ws = file.wb.Sheets[name];
+  if (!ws) {
+    return { ws: null, name, error: `Sheet "${name}" not found. Available: ${file.wb.SheetNames.join(', ')}` };
+  }
+  return { ws, name };
 }
 
 const TOOLS = [
@@ -139,7 +197,7 @@ const TOOLS = [
   },
   {
     name: 'read_rows',
-    description: 'Read actual cell values from specific rows of a file. Use this to understand file structure, headers, where data starts, what values look like. Returns array of rows with cell values. Excel date serial numbers are auto-converted to date strings.',
+    description: 'Read actual cell values from specific rows of a file. Use this to understand file structure, headers, where data starts, what values look like. Returns array of rows with raw cell values. Numbers that look like dates (e.g. 45292) are Excel date serials — convert with: new Date((serial - 25569) * 86400000).',
     input_schema: {
       type: 'object',
       properties: {
@@ -224,23 +282,23 @@ function executeTool(name, input) {
           const range = XLSX.utils.decode_range(ref);
           return { name: n, rows: range.e.r + 1, cols: range.e.c + 1 };
         });
-        return { file: f.name, sheets };
+        const entry = { file: f.name, sheets };
+        if (f.generated) entry.generated = true;
+        return entry;
       });
     }
 
     case 'read_rows': {
       const file = findFile(input.file);
       if (!file) return { error: `File not found: "${input.file}". Available: ${state.files.map(f => f.name).join(', ')}` };
-      const { ws } = getSheet(file, input.sheet);
-      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+      const { ws, error } = getSheet(file, input.sheet);
+      if (error) return { error };
+      const rows = getSheetRows(ws);
       const start = Math.max(0, input.start_row);
       const end = Math.min(rows.length, input.end_row, start + 50);
       const result = [];
       for (let r = start; r < end; r++) {
-        result.push({
-          row: r,
-          cells: (rows[r] || []).map(formatCellValue),
-        });
+        result.push({ row: r, cells: rows[r] || [] });
       }
       return { total_rows: rows.length, returned: result.length, rows: result };
     }
@@ -248,23 +306,22 @@ function executeTool(name, input) {
     case 'get_column_stats': {
       const file = findFile(input.file);
       if (!file) return { error: `File not found: "${input.file}"` };
-      const { ws } = getSheet(file, input.sheet);
-      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+      const { ws, error } = getSheet(file, input.sheet);
+      if (error) return { error };
+      const rows = getSheetRows(ws);
       const startRow = input.start_row || 0;
       const col = input.column;
 
       const types = {};
       const uniques = new Set();
-      let count = 0, numCount = 0, emptyCount = 0;
+      let count = 0, emptyCount = 0;
 
       for (let r = startRow; r < rows.length; r++) {
         const v = (rows[r] || [])[col];
         if (v === null || v === undefined || v === '') { emptyCount++; continue; }
         count++;
-        const t = typeof v;
-        types[t] = (types[t] || 0) + 1;
-        if (t === 'number') numCount++;
-        if (uniques.size < 30) uniques.add(typeof v === 'number' && isDateSerial(v) ? excelDateToStr(v) : String(v));
+        types[typeof v] = (types[typeof v] || 0) + 1;
+        if (uniques.size < 30) uniques.add(String(v));
       }
 
       return {
@@ -281,8 +338,9 @@ function executeTool(name, input) {
     case 'find_rows': {
       const file = findFile(input.file);
       if (!file) return { error: `File not found: "${input.file}"` };
-      const { ws } = getSheet(file, input.sheet);
-      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+      const { ws, error } = getSheet(file, input.sheet);
+      if (error) return { error };
+      const rows = getSheetRows(ws);
       const col = input.column;
       const target = input.value;
       const max = input.max_results || 10;
@@ -291,7 +349,7 @@ function executeTool(name, input) {
       for (let r = 0; r < rows.length && results.length < max; r++) {
         const v = (rows[r] || [])[col];
         if (v !== null && String(v) === target) {
-          results.push({ row: r, cells: (rows[r] || []).map(formatCellValue) });
+          results.push({ row: r, cells: rows[r] || [] });
         }
       }
       return { matches: results.length, rows: results };
@@ -304,8 +362,8 @@ function executeTool(name, input) {
       if (!f2) return { error: `File not found: "${input.file2}"` };
       const { ws: ws1 } = getSheet(f1, null);
       const { ws: ws2 } = getSheet(f2, null);
-      const rows1 = XLSX.utils.sheet_to_json(ws1, { header: 1, defval: null });
-      const rows2 = XLSX.utils.sheet_to_json(ws2, { header: 1, defval: null });
+      const rows1 = getSheetRows(ws1);
+      const rows2 = getSheetRows(ws2);
 
       const keys1 = new Set();
       for (let r = input.start1; r < rows1.length; r++) {
@@ -344,6 +402,8 @@ function executeTool(name, input) {
 
 // ── System Prompt ──────────────────────────────────────────
 const SYSTEM_PROMPT = `You are an Excel processing agent. The user has uploaded Excel files and wants you to process them.
+
+The user may be working iteratively — previous outputs may already be in the file list. When you see files from earlier runs, use them as context for the current request.
 
 ## How You Work
 
@@ -434,12 +494,17 @@ async function callClaudeWithTools(apiKey, model, system, messages, tools) {
 // The sandbox has zero network access — connect-src 'none' is inherited by the Worker.
 
 let _libsPromise = null;
+let _workerSrcCache = null;
+
 function fetchLibraries() {
   if (!_libsPromise) {
     _libsPromise = Promise.all([
       fetch('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js').then(r => r.text()),
       fetch('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js').then(r => r.text()),
-    ]);
+    ]).catch(err => {
+      _libsPromise = null; // Allow retry on next call
+      throw err;
+    });
   }
   return _libsPromise;
 }
@@ -493,7 +558,8 @@ const BRIDGE_HTML = [
 
 async function executeInWorker(code, files) {
   const [sheetjsSrc, jszipSrc] = await fetchLibraries();
-  const workerSrc = sheetjsSrc + ';\n' + jszipSrc + ';\n' + WORKER_HANDLER;
+  if (!_workerSrcCache) _workerSrcCache = sheetjsSrc + ';\n' + jszipSrc + ';\n' + WORKER_HANDLER;
+  const workerSrc = _workerSrcCache;
 
   return new Promise((resolve, reject) => {
     const iframe = document.createElement('iframe');
@@ -671,7 +737,9 @@ $runBtn.addEventListener('click', async () => {
                     state.outputBuffer = result.buffer;
                     state.outputFilename = filename;
                     $downloadBtn.hidden = false;
-                    setStatus('Done (with warnings)');
+                    addGeneratedFile(result.buffer, filename);
+                    showPreview(result.buffer);
+                    setStatus('Done (with warnings) — ask a follow-up or download');
                     logTo($logPanel, 'Max retries reached. Output available but may have issues.', 'log-warn');
                     updateRunBtn();
                     return;
@@ -693,12 +761,22 @@ $runBtn.addEventListener('click', async () => {
               verifyMsg += ` — verify error: ${ve.message}`;
             }
 
-            // Success
+            // Success — store output, add to files, show preview
             state.outputBuffer = result.buffer;
             state.outputFilename = filename;
             $downloadBtn.hidden = false;
-            setStatus('Done');
+            setStatus('Done — ask a follow-up or download');
             logTo($logPanel, verifyMsg, 'log-success');
+
+            // Add output as a new input file for iterative work
+            addGeneratedFile(result.buffer, filename);
+            showPreview(result.buffer);
+
+            // Auto-switch to preview tab
+            document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+            document.querySelector('[data-tab="preview"]').classList.add('active');
+            $codePanel.classList.add('hidden');
+            $previewPanel.classList.remove('hidden');
 
             toolResults.push({
               type: 'tool_result',

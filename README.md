@@ -8,9 +8,11 @@ Drop Excel files, describe what you want in plain English, get a processed and s
 2. Claude explores your files using tools — reading rows, checking column types, comparing keys across sheets
 3. Once it understands the structure, it writes JavaScript to process your data
 4. The code runs in a **sandboxed iframe + Web Worker** with [SheetJS](https://sheetjs.com/) + [JSZip](https://stuk.github.io/jszip/), producing a styled `.xlsx`
-5. You download the result
+5. The output previews in your browser and gets added to the file list — ask follow-up questions to refine it
 
 This is not a one-shot code generator. Claude runs an **agentic loop** — it calls tools to inspect your data (`read_rows`, `get_column_stats`, `find_rows`, `compare_keys`), builds understanding, then writes code. If the code fails or produces bad output, it re-examines and fixes.
+
+**Iterative workflow**: Each output file becomes an input for the next prompt. "Merge these files" → "Now add a percentage column" → "Format as currency and bold headers" — each step builds on the last.
 
 ## Privacy
 
