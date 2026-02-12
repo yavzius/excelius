@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Excel Agent</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0a0a0a; color: #e0e0e0;
+      padding: 2rem; line-height: 1.5;
+    }
+    .container { max-width: 1100px; margin: 0 auto; }
+    h1 { font-size: 1.3rem; color: #fff; margin-bottom: 0.25rem; }
+    .subtitle { font-size: 0.8rem; color: #666; margin-bottom: 1.5rem; }
+
+    /* API Key */
+    .api-key-row {
+      display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem;
+    }
+    .api-key-row label { font-size: 0.85rem; color: #888; white-space: nowrap; }
+    .api-key-row input {
+      flex: 1; padding: 0.5rem 0.75rem; background: #1a1a1a;
+      border: 1px solid #333; border-radius: 4px; color: #e0e0e0;
+      font-size: 0.85rem; font-family: monospace;
+    }
+    .api-key-row input:focus { outline: none; border-color: #555; }
+
+    /* Drop Zone */
+    .drop-zone {
+      border: 2px dashed #333; border-radius: 8px; padding: 2rem;
+      text-align: center; cursor: pointer; transition: border-color 0.2s;
+      margin-bottom: 1rem;
+    }
+    .drop-zone.dragover { border-color: #4a9; background: rgba(68,170,153,0.05); }
+    .drop-zone p { color: #666; font-size: 0.9rem; }
+    .drop-zone .hint { font-size: 0.75rem; color: #444; margin-top: 0.25rem; }
+
+    /* File List */
+    .file-list { margin-bottom: 1rem; }
+    .file-item {
+      padding: 0.5rem 0.75rem; background: #111; border: 1px solid #222;
+      border-radius: 4px; margin-bottom: 0.5rem; font-size: 0.8rem;
+    }
+    .file-item-top {
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .file-item .name { color: #4a9; font-family: monospace; }
+    .file-item .remove {
+      color: #666; cursor: pointer; padding: 0 0.25rem;
+      border: none; background: none; font-size: 1rem;
+    }
+    .file-item .remove:hover { color: #e55; }
+    .sheet-summary { margin-top: 0.4rem; color: #888; font-size: 0.75rem; }
+
+    /* Prompt */
+    .prompt-area { margin-bottom: 1rem; }
+    .prompt-area textarea {
+      width: 100%; height: 100px; padding: 0.75rem;
+      background: #1a1a1a; color: #e0e0e0; border: 1px solid #333;
+      border-radius: 6px; font-size: 0.9rem; resize: vertical;
+    }
+    .prompt-area textarea:focus { outline: none; border-color: #555; }
+    .prompt-area textarea::placeholder { color: #555; }
+
+    /* Controls */
+    .controls { display: flex; gap: 0.5rem; margin-bottom: 1rem; align-items: center; }
+    button {
+      padding: 0.5rem 1.25rem; border: 1px solid #333; border-radius: 4px;
+      background: #1a1a1a; color: #e0e0e0; cursor: pointer; font-size: 0.85rem;
+    }
+    button:hover { background: #2a2a2a; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-run { border-color: #4a9; color: #4a9; font-weight: 600; }
+    .btn-run:hover:not(:disabled) { background: rgba(68,170,153,0.1); }
+    .btn-download { border-color: #68b; color: #68b; }
+    .btn-download:hover { background: rgba(102,136,187,0.1); }
+    .status { font-size: 0.8rem; color: #666; margin-left: 0.5rem; }
+
+    /* Output Panels */
+    .panels {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;
+      margin-bottom: 1rem;
+    }
+    .panel {
+      background: #111; border: 1px solid #222; border-radius: 6px;
+      overflow: hidden; display: flex; flex-direction: column;
+    }
+    .panel-header {
+      padding: 0.4rem 0.75rem; background: #1a1a1a;
+      border-bottom: 1px solid #222; font-size: 0.75rem;
+      color: #666; text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .panel-body {
+      padding: 0.75rem; font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.8rem; white-space: pre-wrap; overflow-y: auto;
+      max-height: 400px; min-height: 200px; flex: 1;
+    }
+
+    /* Log colors */
+    .log-info { color: #aaa; }
+    .log-warn { color: #e95; }
+    .log-error { color: #e55; }
+    .log-success { color: #4a9; }
+    .log-meta { color: #666; font-style: italic; }
+
+    /* Model selector */
+    .model-select {
+      padding: 0.4rem 0.5rem; background: #1a1a1a;
+      border: 1px solid #333; border-radius: 4px;
+      color: #888; font-size: 0.8rem;
+    }
+
+    @media (max-width: 768px) {
+      .panels { grid-template-columns: 1fr; }
+      body { padding: 1rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Excel Agent</h1>
+    <p class="subtitle">Drop files, describe what you want, get a styled output. All data stays local.</p>
+
+    <div class="api-key-row">
+      <label for="apiKey">API Key</label>
+      <input type="password" id="apiKey" placeholder="sk-ant-...">
+    </div>
+
+    <div class="drop-zone" id="dropZone">
+      <p>Drop .xlsx files here or click to browse</p>
+      <p class="hint">Files are processed locally — only structure metadata is sent to Claude</p>
+      <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.csv" hidden>
+    </div>
+
+    <div class="file-list" id="fileList"></div>
+
+    <div class="prompt-area">
+      <textarea id="prompt" placeholder="Describe what you want done with these files...&#10;&#10;Example: Sum January through March for each account and add columns for 2022, 2023, 2024 next to the 2025 data. Bold the headers and format numbers with commas."></textarea>
+    </div>
+
+    <div class="controls">
+      <button class="btn-run" id="runBtn" disabled>Run</button>
+      <select class="model-select" id="modelSelect">
+        <option value="claude-sonnet-4-5-20250929">Sonnet 4.5</option>
+        <option value="claude-opus-4-6">Opus 4.6</option>
+      </select>
+      <span class="status" id="status"></span>
+      <span style="flex:1"></span>
+      <button class="btn-download" id="downloadBtn" hidden>Download Output</button>
+    </div>
+
+    <div class="panels">
+      <div class="panel">
+        <div class="panel-header">Code</div>
+        <div class="panel-body" id="codePanel"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">Log</div>
+        <div class="panel-body" id="logPanel"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
