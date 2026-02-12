@@ -4,7 +4,9 @@
 // ── Constants ─────────────────────────────────────────────
 const MAX_API_RETRIES = 3;
 const RETRY_STATUS_CODES = [429, 529, 502, 503];
-const MAX_AGENT_TURNS = 20;
+const MODEL_EXPLORE = 'claude-haiku-4-5-20251001';
+const MODEL_CODEGEN = 'claude-opus-4-6';
+const MAX_EXPLORATION_TURNS = 15;
 const MAX_CODE_RETRIES = 3;
 const MAX_TOKENS_DEFAULT = 16384;
 const MAX_TOKENS_EXTENDED = 32768;
@@ -322,6 +324,73 @@ const TOOLS = [
     },
   },
   {
+    name: 'submit_report',
+    description: 'Submit your exploration findings as a structured report. Call this when you have thoroughly explored all files and understand their structure, relationships, and any data issues. A separate code generation agent will use this report to write the processing code.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        files: {
+          type: 'array',
+          description: 'Analysis of each file',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              sheets: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string' },
+                    row_count: { type: 'integer' },
+                    col_count: { type: 'integer' },
+                    headers: { type: 'array', items: { type: 'string' } },
+                    header_row: { type: 'integer', description: '0-indexed row where headers are' },
+                    sample_rows: { type: 'array', description: '3-5 representative data rows after headers' },
+                    data_types: { type: 'object', description: 'Column name → "number" | "string" | "date" | "mixed"' },
+                    key_columns: { type: 'array', items: { type: 'string' }, description: 'Columns with high uniqueness (likely join keys)' },
+                    notable: { type: 'array', items: { type: 'string' }, description: 'Observations: totals rows, blank rows, date formats, etc.' },
+                  },
+                  required: ['name', 'row_count', 'col_count', 'headers', 'header_row'],
+                },
+              },
+            },
+            required: ['name', 'sheets'],
+          },
+        },
+        relationships: {
+          type: 'array',
+          description: 'Cross-file relationships discovered via compare_keys',
+          items: {
+            type: 'object',
+            properties: {
+              file1: { type: 'string' },
+              file2: { type: 'string' },
+              sheet1: { type: 'string' },
+              sheet2: { type: 'string' },
+              join_key: { type: 'string' },
+              shared_count: { type: 'integer' },
+              only_in_file1: { type: 'integer' },
+              only_in_file2: { type: 'integer' },
+              match_rate: { type: 'string', description: 'e.g. "95% (380/400)"' },
+            },
+            required: ['file1', 'file2', 'join_key'],
+          },
+        },
+        data_issues: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Warnings the code agent should know about: blank rows, date serial numbers, merged cells, etc.',
+        },
+        recommended_approach: {
+          type: 'string',
+          description: 'Natural language suggestion for how to solve the user\'s task based on what you found.',
+        },
+      },
+      required: ['files', 'data_issues', 'recommended_approach'],
+    },
+  },
+  {
     name: 'generate_code',
     description: 'Submit the final JavaScript code to process the files. Only call this after you fully understand the file structures, data relationships, and the user\'s intent. The code runs in a Web Worker with XLSX (SheetJS) and JSZip as globals. It must return { buffer: ArrayBuffer, filename: string }.',
     input_schema: {
@@ -473,6 +542,9 @@ function executeTool(name, input) {
         sample_only_file2: only2.slice(0, 5),
       };
     }
+
+    case 'submit_report':
+      return { error: 'submit_report is handled by the exploration agent loop, not executeTool' };
 
     case 'generate_code':
       return { error: 'generate_code is handled by the agent loop, not executeTool' };
