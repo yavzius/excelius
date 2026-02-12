@@ -710,6 +710,84 @@ async function runExplorationAgent(apiKey, prompt, signal) {
   throw new Error('Exploration agent hit turn limit without submitting a report');
 }
 
+// ── Code Generation Agent (Opus) ─────────────────────────
+// Receives the exploration report, generates SheetJS/JSZip code.
+// Retries with error feedback if execution fails.
+
+async function runCodeGenAgent(apiKey, prompt, report, signal) {
+  const systemPrompt = buildCodeGenPrompt(report);
+  const messages = [
+    { role: 'user', content: `Task: ${prompt}\n\nThe exploration report is in the system prompt. Generate the processing code.` },
+  ];
+
+  // Only generate_code is available to this agent
+  const codeTools = TOOLS.filter(t => t.name === 'generate_code');
+
+  for (let attempt = 0; attempt < MAX_CODE_RETRIES; attempt++) {
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+
+    setStatus(attempt === 0 ? 'Generating code...' : `Fixing code (attempt ${attempt + 1})...`);
+
+    let response = await callClaudeWithTools(
+      apiKey, MODEL_CODEGEN, systemPrompt, messages, codeTools, signal
+    );
+
+    // Handle max_tokens truncation
+    if (response.stop_reason === 'max_tokens') {
+      const last = response.content[response.content.length - 1];
+      if (last?.type === 'tool_use') {
+        logTo($logPanel, 'Response truncated mid-tool-call — retrying with higher limit...', 'log-warn');
+        response = await callClaudeWithTools(
+          apiKey, MODEL_CODEGEN, systemPrompt, messages, codeTools, signal, MAX_TOKENS_EXTENDED
+        );
+      }
+    }
+
+    updateTokens('codegen', response.usage);
+
+    const assistantContent = response.content;
+    messages.push({ role: 'assistant', content: assistantContent });
+
+    // Log text blocks
+    for (const block of assistantContent) {
+      if (block.type === 'text' && block.text.trim()) {
+        logTo($logPanel, block.text, 'log-meta');
+      }
+    }
+
+    const codeBlock = assistantContent.find(b => b.type === 'tool_use' && b.name === 'generate_code');
+    if (!codeBlock) {
+      if (response.stop_reason !== 'tool_use') {
+        throw new Error('Code agent finished without calling generate_code');
+      }
+      continue;
+    }
+
+    const gen = await executeGeneratedCode({ id: codeBlock.id, input: codeBlock.input, signal });
+
+    if (gen.action === 'success') {
+      return gen;
+    }
+
+    // Feed error back for retry
+    messages.push({ role: 'user', content: [gen.toolResult] });
+
+    // On last attempt, offer partial output if available
+    if (attempt === MAX_CODE_RETRIES - 1 && gen.buffer) {
+      state.outputBuffer = gen.buffer;
+      state.outputFilename = gen.filename;
+      $downloadBtn.hidden = false;
+      addGeneratedFile(gen.buffer, gen.filename, gen.verifyWb);
+      showPreview(gen.verifyWb);
+      setStatus('Done (with warnings) — ask a follow-up or download');
+      logTo($logPanel, 'Max retries reached. Output available but may have issues.', 'log-warn');
+      return gen;
+    }
+  }
+
+  throw new Error('Code generation failed after max retries');
+}
+
 // ── Claude API (non-streaming, with tool use + retry) ─────
 async function callClaudeWithTools(apiKey, model, system, messages, tools, signal, maxTokens = MAX_TOKENS_DEFAULT) {
   for (let attempt = 0; attempt <= MAX_API_RETRIES; attempt++) {
