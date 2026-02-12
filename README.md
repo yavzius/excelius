@@ -7,7 +7,7 @@ Drop Excel files, describe what you want in plain English, get a processed and s
 1. You upload `.xlsx` files and type a prompt ("merge these by account, sum Q1, bold headers")
 2. Claude explores your files using tools — reading rows, checking column types, comparing keys across sheets
 3. Once it understands the structure, it writes JavaScript to process your data
-4. The code runs in a Web Worker with [SheetJS](https://sheetjs.com/) + [JSZip](https://stuk.github.io/jszip/), producing a styled `.xlsx`
+4. The code runs in a **sandboxed iframe + Web Worker** with [SheetJS](https://sheetjs.com/) + [JSZip](https://stuk.github.io/jszip/), producing a styled `.xlsx`
 5. You download the result
 
 This is not a one-shot code generator. Claude runs an **agentic loop** — it calls tools to inspect your data (`read_rows`, `get_column_stats`, `find_rows`, `compare_keys`), builds understanding, then writes code. If the code fails or produces bad output, it re-examines and fixes.
@@ -15,6 +15,8 @@ This is not a one-shot code generator. Claude runs an **agentic loop** — it ca
 ## Privacy
 
 Your financial data stays in the browser. Only file metadata (sheet names, column headers, row counts) crosses the network to the Claude API. No values, no dollar amounts, no account balances.
+
+Generated code executes inside a sandboxed iframe with `Content-Security-Policy: connect-src 'none'` — the sandbox has no network access. Even if the LLM produces a `fetch()` call, CSP blocks it. Libraries are pre-fetched in the trusted parent context and passed in as source text.
 
 ## Usage
 

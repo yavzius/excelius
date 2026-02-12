@@ -428,13 +428,23 @@ async function callClaudeWithTools(apiKey, model, system, messages, tools) {
   return response.json();
 }
 
-// ── Worker Execution ───────────────────────────────────────
-const WORKER_CODE = `
-importScripts(
-  'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js',
-  'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js'
-);
+// ── Sandboxed Execution ────────────────────────────────────
+// Code runs inside: sandboxed iframe (opaque origin, CSP blocks network) → Web Worker.
+// Libraries are pre-fetched in the trusted parent and passed as source text.
+// The sandbox has zero network access — connect-src 'none' is inherited by the Worker.
 
+let _libsPromise = null;
+function fetchLibraries() {
+  if (!_libsPromise) {
+    _libsPromise = Promise.all([
+      fetch('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js').then(r => r.text()),
+      fetch('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js').then(r => r.text()),
+    ]);
+  }
+  return _libsPromise;
+}
+
+const WORKER_HANDLER = `
 self.onmessage = async function(e) {
   const { code, fileBuffers } = e.data;
   const files = fileBuffers.map(f => ({ name: f.name, buffer: f.buffer }));
@@ -463,39 +473,72 @@ self.onmessage = async function(e) {
 };
 `;
 
-function executeInWorker(code, files) {
+const BRIDGE_HTML = [
+  '<!DOCTYPE html><html><head>',
+  "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob:; worker-src blob:;\">",
+  '</head><body><script>',
+  'window.addEventListener("message", function(e) {',
+  '  var msg = e.data;',
+  '  if (msg.type !== "exec") return;',
+  '  var blob = new Blob([msg.workerSrc], { type: "application/javascript" });',
+  '  var worker = new Worker(URL.createObjectURL(blob));',
+  '  worker.onmessage = function(ev) { parent.postMessage(ev.data, "*"); };',
+  '  worker.onerror = function(err) { parent.postMessage({ type: "error", message: err.message || "Worker error" }, "*"); };',
+  '  var transfers = msg.fileBuffers.map(function(f) { return f.buffer; });',
+  '  worker.postMessage({ code: msg.code, fileBuffers: msg.fileBuffers }, transfers);',
+  '});',
+  'parent.postMessage({ type: "bridge_ready" }, "*");',
+  '<\/script></body></html>',
+].join('\n');
+
+async function executeInWorker(code, files) {
+  const [sheetjsSrc, jszipSrc] = await fetchLibraries();
+  const workerSrc = sheetjsSrc + ';\n' + jszipSrc + ';\n' + WORKER_HANDLER;
+
   return new Promise((resolve, reject) => {
-    const blob = new Blob([WORKER_CODE], { type: 'application/javascript' });
-    const worker = new Worker(URL.createObjectURL(blob));
+    const iframe = document.createElement('iframe');
+    iframe.sandbox = 'allow-scripts';
+    iframe.style.display = 'none';
+    iframe.srcdoc = BRIDGE_HTML;
 
     const timeout = setTimeout(() => {
-      worker.terminate();
+      cleanup();
       reject(new Error('Worker timed out (120s)'));
     }, 120000);
 
-    worker.onmessage = (e) => {
+    function cleanup() {
+      clearTimeout(timeout);
+      window.removeEventListener('message', onMessage);
+      if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+    }
+
+    function onMessage(e) {
+      if (e.source !== iframe.contentWindow) return;
       const msg = e.data;
+
+      if (msg.type === 'bridge_ready') {
+        const fileBuffers = files.map(f => ({ name: f.name, buffer: f.buffer.slice(0) }));
+        const transfers = fileBuffers.map(f => f.buffer);
+        iframe.contentWindow.postMessage(
+          { type: 'exec', workerSrc, code, fileBuffers },
+          '*', transfers
+        );
+        return;
+      }
+
       if (msg.type === 'log') {
         logTo($logPanel, msg.message, 'log-info');
       } else if (msg.type === 'result') {
-        clearTimeout(timeout);
-        worker.terminate();
+        cleanup();
         resolve({ buffer: msg.buffer, filename: msg.filename });
       } else if (msg.type === 'error') {
-        clearTimeout(timeout);
-        worker.terminate();
+        cleanup();
         reject(new Error(msg.message + (msg.stack ? '\n' + msg.stack : '')));
       }
-    };
+    }
 
-    worker.onerror = (err) => {
-      clearTimeout(timeout);
-      worker.terminate();
-      reject(new Error(err.message || 'Worker error'));
-    };
-
-    const fileBuffers = files.map(f => ({ name: f.name, buffer: f.buffer.slice(0) }));
-    worker.postMessage({ code, fileBuffers });
+    window.addEventListener('message', onMessage);
+    document.body.appendChild(iframe);
   });
 }
 
