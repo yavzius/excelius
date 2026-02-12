@@ -16,7 +16,7 @@ This is not a one-shot code generator. Claude runs an **agentic loop** — it ca
 
 ## Privacy
 
-Your financial data stays in the browser. Only file metadata (sheet names, column headers, row counts) crosses the network to the Claude API. No values, no dollar amounts, no account balances.
+All processing happens in your browser. Files are parsed locally with SheetJS — Claude sees **row samples** (up to 50 rows per tool call) and **column statistics** (types, unique counts, min/max) to understand structure. Full datasets are never sent in bulk.
 
 Generated code executes inside a sandboxed iframe with `Content-Security-Policy: connect-src 'none'` — the sandbox has no network access. Even if the LLM produces a `fetch()` call, CSP blocks it. Libraries are pre-fetched in the trusted parent context and passed in as source text.
 

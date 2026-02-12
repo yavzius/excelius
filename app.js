@@ -1,20 +1,60 @@
-// ── State ──────────────────────────────────────────────────
+// XLSX is loaded as a global via <script> tag in index.html (SheetJS).
+/* global XLSX */
+
+// ── Constants ─────────────────────────────────────────────
+const MAX_API_RETRIES = 3;
+const RETRY_STATUS_CODES = [429, 529, 502, 503];
+const MAX_AGENT_TURNS = 20;
+const MAX_CODE_RETRIES = 3;
+const MAX_TOKENS_DEFAULT = 16384;
+const MAX_TOKENS_EXTENDED = 32768;
+const WORKER_TIMEOUT_MS = 120_000;
+// Leave ~80k tokens of headroom for system prompt, current turn, and response within a 200k context window
+const TOKEN_PRUNE_THRESHOLD = 120_000;
+const PRUNE_KEEP_RECENT = 8;
+const PRUNE_CONTENT_LIMIT = 200;
+const MAX_PREVIEW_ROWS = 50;
+const MAX_READ_ROWS = 50;
+const MAX_UNIQUE_VALUES = 30;
+const TOOL_RESULT_MAX_CHARS = 4000;
+
+// ── State ─────────────────────────────────────────────────
 const state = {
-  files: [],      // { name, buffer (ArrayBuffer), wb (parsed workbook), generated? }
+  files: [],      // { name, buffer (ArrayBuffer), wb (parsed workbook), summary (string), generated? (bool) }
   outputBuffer: null,
   outputFilename: null,
+  abortController: null,
+  running: false,
+  totalInputTokens: 0,
+  totalOutputTokens: 0,
 };
 
-// Cache: WeakMap<worksheet, rows[]> — avoids re-parsing on every tool call
-const _sheetJsonCache = new WeakMap();
+// ── Workbook Helpers ──────────────────────────────────────
+function parseWorkbook(buffer) {
+  return XLSX.read(buffer, { type: 'array' });
+}
+
+function summarizeWorkbook(wb) {
+  return wb.SheetNames.map(n => {
+    const ws = wb.Sheets[n];
+    const ref = ws['!ref'];
+    if (!ref) return `${n}: empty`;
+    const range = XLSX.utils.decode_range(ref);
+    return `${n} (${range.e.r + 1} rows × ${range.e.c + 1} cols)`;
+  }).join(', ');
+}
+
+// Cache: WeakMap<worksheet, rows[]> — avoids re-parsing on every tool call.
+// WeakMap ensures entries are garbage-collected when worksheets leave state.files.
+const sheetJsonCache = new WeakMap();
 function getSheetRows(ws) {
-  if (_sheetJsonCache.has(ws)) return _sheetJsonCache.get(ws);
+  if (sheetJsonCache.has(ws)) return sheetJsonCache.get(ws);
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
-  _sheetJsonCache.set(ws, rows);
+  sheetJsonCache.set(ws, rows);
   return rows;
 }
 
-// ── DOM refs ───────────────────────────────────────────────
+// ── DOM Refs ──────────────────────────────────────────────
 const $apiKey = document.getElementById('apiKey');
 const $dropZone = document.getElementById('dropZone');
 const $fileInput = document.getElementById('fileInput');
@@ -26,29 +66,15 @@ const $status = document.getElementById('status');
 const $codePanel = document.getElementById('codePanel');
 const $logPanel = document.getElementById('logPanel');
 const $previewPanel = document.getElementById('previewPanel');
+const $cancelBtn = document.getElementById('cancelBtn');
+const $tokenCounter = document.getElementById('tokenCounter');
 const $downloadBtn = document.getElementById('downloadBtn');
 
-// ── Panel Tabs ─────────────────────────────────────────────
-document.querySelectorAll('.panel-tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
-    tab.classList.add('active');
-    const show = tab.dataset.tab;
-    $codePanel.classList.toggle('hidden', show !== 'code');
-    $previewPanel.classList.toggle('hidden', show !== 'preview');
-  });
-});
-
-// ── API Key persistence ────────────────────────────────────
-$apiKey.value = localStorage.getItem('excel-agent-api-key') || '';
-$apiKey.addEventListener('input', () => {
-  localStorage.setItem('excel-agent-api-key', $apiKey.value);
-  updateRunBtn();
-});
-
-// ── Helpers ────────────────────────────────────────────────
+// ── UI Helpers ────────────────────────────────────────────
+// Escape HTML special characters to prevent XSS in innerHTML contexts
+const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function esc(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(s).replace(/[&<>"']/g, c => ESC_MAP[c]);
 }
 
 function logTo(panel, text, cls = 'log-info') {
@@ -63,11 +89,45 @@ function clearPanel(panel) { panel.innerHTML = ''; }
 function setStatus(text) { $status.textContent = text; }
 
 function updateRunBtn() {
-  $runBtn.disabled = !(state.files.length > 0 && $apiKey.value.trim() && $prompt.value.trim());
+  $runBtn.disabled = state.running || !(state.files.length > 0 && $apiKey.value.trim() && $prompt.value.trim());
 }
 
-// ── File Drop / Upload ─────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.panel-tab').forEach(t => {
+    const isActive = t.dataset.tab === name;
+    t.classList.toggle('active', isActive);
+    t.setAttribute('aria-selected', isActive);
+  });
+  $codePanel.classList.toggle('hidden', name !== 'code');
+  $previewPanel.classList.toggle('hidden', name !== 'preview');
+}
+
+function updateTokenCounter() {
+  const total = state.totalInputTokens + state.totalOutputTokens;
+  if (total === 0) { $tokenCounter.textContent = ''; return; }
+  $tokenCounter.textContent = `${(total / 1000).toFixed(1)}k tokens`;
+}
+
+// ── Panel Tabs ────────────────────────────────────────────
+document.querySelectorAll('.panel-tab').forEach(tab => {
+  tab.addEventListener('click', () => switchTab(tab.dataset.tab));
+});
+
+// ── API Key Persistence ───────────────────────────────────
+$apiKey.value = localStorage.getItem('excel-agent-api-key') || '';
+$apiKey.addEventListener('input', () => {
+  localStorage.setItem('excel-agent-api-key', $apiKey.value);
+  updateRunBtn();
+});
+
+// ── File Drop / Upload ────────────────────────────────────
 $dropZone.addEventListener('click', () => $fileInput.click());
+$dropZone.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    $fileInput.click();
+  }
+});
 $fileInput.addEventListener('change', (e) => addFiles(e.target.files));
 
 $dropZone.addEventListener('dragover', (e) => {
@@ -83,19 +143,24 @@ $dropZone.addEventListener('drop', (e) => {
 
 $prompt.addEventListener('input', updateRunBtn);
 
+function removeGeneratedByName(name) {
+  const idx = state.files.findIndex(f => f.name === name && f.generated);
+  if (idx !== -1) state.files.splice(idx, 1);
+}
+
 async function addFiles(fileListObj) {
   for (const file of fileListObj) {
-    const buffer = await file.arrayBuffer();
-    const wb = XLSX.read(buffer, { type: 'array' });
-    const summary = wb.SheetNames.map(n => {
-      const ws = wb.Sheets[n];
-      const ref = ws['!ref'];
-      if (!ref) return `${n}: empty`;
-      const range = XLSX.utils.decode_range(ref);
-      return `${n} (${range.e.r + 1} rows × ${range.e.c + 1} cols)`;
-    }).join(', ');
-    state.files.push({ name: file.name, buffer, wb, summary });
+    if (state.files.some(f => f.name === file.name && !f.generated)) continue;
+    removeGeneratedByName(file.name);
+    try {
+      const buffer = await file.arrayBuffer();
+      const wb = parseWorkbook(buffer);
+      state.files.push({ name: file.name, buffer, wb, summary: summarizeWorkbook(wb) });
+    } catch (err) {
+      logTo($logPanel, `Failed to read "${file.name}": ${err.message}`, 'log-error');
+    }
   }
+  $fileInput.value = ''; // Reset so re-uploading same file triggers change event
   renderFileList();
   updateRunBtn();
 }
@@ -106,76 +171,79 @@ function removeFile(index) {
   updateRunBtn();
 }
 
+// Event delegation — registered once, no re-binding on each render
+$fileList.addEventListener('click', (e) => {
+  const btn = e.target.closest('.remove');
+  if (btn) removeFile(parseInt(btn.dataset.idx, 10));
+});
+
 function renderFileList() {
   $fileList.innerHTML = state.files.map((f, i) => `
     <div class="file-item${f.generated ? ' generated' : ''}">
       <div class="file-item-top">
         <span class="name">${esc(f.name)}${f.generated ? '<span class="badge badge-generated">generated</span>' : ''}</span>
-        <button class="remove" data-idx="${i}">&times;</button>
+        <button class="remove" data-idx="${i}" aria-label="Remove ${esc(f.name)}">&times;</button>
       </div>
       <div class="sheet-summary">${esc(f.summary)}</div>
     </div>
   `).join('');
-  $fileList.querySelectorAll('.remove').forEach(btn => {
-    btn.addEventListener('click', () => removeFile(parseInt(btn.dataset.idx)));
-  });
 }
 
-function showPreview(buffer) {
+function showPreview(wb) {
+  if (!wb) {
+    $previewPanel.innerHTML = '<div class="preview-empty">Could not preview output</div>';
+    return;
+  }
   try {
-    const wb = XLSX.read(buffer, { type: 'array' });
     const ws = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
-    const maxRows = Math.min(rows.length, 50);
+    const rows = getSheetRows(ws);
+    const maxRows = Math.min(rows.length, MAX_PREVIEW_ROWS);
     if (maxRows === 0) {
       $previewPanel.innerHTML = '<div class="preview-empty">Output is empty</div>';
       return;
     }
-    let html = '<table class="preview-table"><thead><tr>';
-    // Use first row as headers
+    const parts = ['<table class="preview-table"><thead><tr>'];
     const headers = rows[0] || [];
-    for (const h of headers) html += `<th>${esc(h ?? '')}</th>`;
-    html += '</tr></thead><tbody>';
+    for (const h of headers) parts.push(`<th>${esc(h ?? '')}</th>`);
+    parts.push('</tr></thead><tbody>');
     for (let r = 1; r < maxRows; r++) {
-      html += '<tr>';
+      parts.push('<tr>');
       const row = rows[r] || [];
       for (let c = 0; c < headers.length; c++) {
-        html += `<td>${esc(row[c] ?? '')}</td>`;
+        parts.push(`<td>${esc(row[c] ?? '')}</td>`);
       }
-      html += '</tr>';
+      parts.push('</tr>');
     }
-    html += '</tbody></table>';
-    if (rows.length > 50) html += `<div class="preview-empty">${rows.length - 50} more rows...</div>`;
-    $previewPanel.innerHTML = html;
-  } catch {
-    $previewPanel.innerHTML = '<div class="preview-empty">Could not preview output</div>';
+    parts.push('</tbody></table>');
+    if (rows.length > MAX_PREVIEW_ROWS) parts.push(`<div class="preview-empty">${rows.length - MAX_PREVIEW_ROWS} more rows...</div>`);
+    $previewPanel.innerHTML = parts.join('');
+  } catch (err) {
+    logTo($logPanel, `Preview failed: ${err.message}`, 'log-error');
+    $previewPanel.innerHTML = `<div class="preview-empty">Could not preview output: ${esc(err.message)}</div>`;
   }
 }
 
-function addGeneratedFile(buffer, filename) {
-  const wb = XLSX.read(buffer, { type: 'array' });
-  const summary = wb.SheetNames.map(n => {
-    const ws = wb.Sheets[n];
-    const ref = ws['!ref'];
-    if (!ref) return `${n}: empty`;
-    const range = XLSX.utils.decode_range(ref);
-    return `${n} (${range.e.r + 1} rows × ${range.e.c + 1} cols)`;
-  }).join(', ');
-
-  // Remove any previous generated file with the same name
-  const existing = state.files.findIndex(f => f.name === filename && f.generated);
-  if (existing !== -1) state.files.splice(existing, 1);
-
-  state.files.push({ name: filename, buffer, wb, summary, generated: true });
+function addGeneratedFile(buffer, filename, wb = null) {
+  removeGeneratedByName(filename);
+  if (!wb) {
+    try {
+      wb = parseWorkbook(buffer);
+    } catch (err) {
+      logTo($logPanel, `Could not parse generated file: ${err.message}`, 'log-error');
+      state.files.push({ name: filename, buffer, wb: null, summary: '(could not parse)', generated: true });
+      renderFileList();
+      return;
+    }
+  }
+  state.files.push({ name: filename, buffer, wb, summary: summarizeWorkbook(wb), generated: true });
   renderFileList();
 }
 
-// ── Tool Definitions for Claude ────────────────────────────
-// Claude gets these tools to explore the files before writing code.
+// ── Tool Definitions for Claude ───────────────────────────
+// Tool schemas follow Claude API snake_case convention; JS internals use camelCase.
 
 function findFile(nameQuery) {
   const q = nameQuery.toLowerCase();
-  // Exact match first, then substring fallback
   return state.files.find(f => f.name.toLowerCase() === q)
       || state.files.find(f => f.name.toLowerCase().includes(q));
 }
@@ -183,10 +251,8 @@ function findFile(nameQuery) {
 function getSheet(file, sheetName) {
   const name = sheetName || file.wb.SheetNames[0];
   const ws = file.wb.Sheets[name];
-  if (!ws) {
-    return { ws: null, name, error: `Sheet "${name}" not found. Available: ${file.wb.SheetNames.join(', ')}` };
-  }
-  return { ws, name };
+  if (!ws) return { ws: null, error: `Sheet "${name}" not found. Available: ${file.wb.SheetNames.join(', ')}` };
+  return { ws };
 }
 
 const TOOLS = [
@@ -245,9 +311,11 @@ const TOOLS = [
       type: 'object',
       properties: {
         file1: { type: 'string', description: 'First file name' },
+        sheet1: { type: 'string', description: 'Sheet name in file1 (omit for first)' },
         col1: { type: 'integer', description: 'Key column in file1' },
         start1: { type: 'integer', description: 'Data start row in file1' },
         file2: { type: 'string', description: 'Second file name' },
+        sheet2: { type: 'string', description: 'Sheet name in file2 (omit for first)' },
         col2: { type: 'integer', description: 'Key column in file2' },
         start2: { type: 'integer', description: 'Data start row in file2' },
       },
@@ -266,10 +334,16 @@ const TOOLS = [
       },
       required: ['code', 'filename'],
     },
+    cache_control: { type: 'ephemeral' },
   },
 ];
 
-// ── Tool Execution ─────────────────────────────────────────
+// ── Tool Execution ────────────────────────────────────────
+// generate_code is handled separately in the agent loop; see executeGeneratedCode().
+
+function fileNotFound(nameQuery) {
+  return { error: `File not found: "${nameQuery}". Available: ${state.files.map(f => f.name).join(', ')}` };
+}
 
 function executeTool(name, input) {
   switch (name) {
@@ -290,12 +364,12 @@ function executeTool(name, input) {
 
     case 'read_rows': {
       const file = findFile(input.file);
-      if (!file) return { error: `File not found: "${input.file}". Available: ${state.files.map(f => f.name).join(', ')}` };
+      if (!file) return fileNotFound(input.file);
       const { ws, error } = getSheet(file, input.sheet);
       if (error) return { error };
       const rows = getSheetRows(ws);
       const start = Math.max(0, input.start_row);
-      const end = Math.min(rows.length, input.end_row, start + 50);
+      const end = Math.min(rows.length, input.end_row, start + MAX_READ_ROWS);
       const result = [];
       for (let r = start; r < end; r++) {
         result.push({ row: r, cells: rows[r] || [] });
@@ -305,11 +379,11 @@ function executeTool(name, input) {
 
     case 'get_column_stats': {
       const file = findFile(input.file);
-      if (!file) return { error: `File not found: "${input.file}"` };
+      if (!file) return fileNotFound(input.file);
       const { ws, error } = getSheet(file, input.sheet);
       if (error) return { error };
       const rows = getSheetRows(ws);
-      const startRow = input.start_row || 0;
+      const startRow = input.start_row ?? 0;
       const col = input.column;
 
       const types = {};
@@ -321,7 +395,7 @@ function executeTool(name, input) {
         if (v === null || v === undefined || v === '') { emptyCount++; continue; }
         count++;
         types[typeof v] = (types[typeof v] || 0) + 1;
-        if (uniques.size < 30) uniques.add(String(v));
+        if (uniques.size < MAX_UNIQUE_VALUES) uniques.add(String(v));
       }
 
       return {
@@ -330,20 +404,20 @@ function executeTool(name, input) {
         non_empty: count,
         empty: emptyCount,
         types,
-        unique_count: uniques.size >= 30 ? '30+' : uniques.size,
-        unique_values: uniques.size <= 30 ? [...uniques] : [...uniques].slice(0, 30).concat(['...']),
+        unique_count: uniques.size >= MAX_UNIQUE_VALUES ? `${MAX_UNIQUE_VALUES}+` : uniques.size,
+        unique_values: uniques.size <= MAX_UNIQUE_VALUES ? [...uniques] : [...uniques].slice(0, MAX_UNIQUE_VALUES).concat(['...']),
       };
     }
 
     case 'find_rows': {
       const file = findFile(input.file);
-      if (!file) return { error: `File not found: "${input.file}"` };
+      if (!file) return fileNotFound(input.file);
       const { ws, error } = getSheet(file, input.sheet);
       if (error) return { error };
       const rows = getSheetRows(ws);
       const col = input.column;
       const target = input.value;
-      const max = input.max_results || 10;
+      const max = input.max_results ?? 10;
       const results = [];
 
       for (let r = 0; r < rows.length && results.length < max; r++) {
@@ -358,10 +432,12 @@ function executeTool(name, input) {
     case 'compare_keys': {
       const f1 = findFile(input.file1);
       const f2 = findFile(input.file2);
-      if (!f1) return { error: `File not found: "${input.file1}"` };
-      if (!f2) return { error: `File not found: "${input.file2}"` };
-      const { ws: ws1 } = getSheet(f1, null);
-      const { ws: ws2 } = getSheet(f2, null);
+      if (!f1) return fileNotFound(input.file1);
+      if (!f2) return fileNotFound(input.file2);
+      const { ws: ws1, error: e1 } = getSheet(f1, input.sheet1);
+      if (e1) return { error: e1 };
+      const { ws: ws2, error: e2 } = getSheet(f2, input.sheet2);
+      if (e2) return { error: e2 };
       const rows1 = getSheetRows(ws1);
       const rows2 = getSheetRows(ws2);
 
@@ -376,14 +452,22 @@ function executeTool(name, input) {
         if (v !== null && v !== undefined && String(v).trim()) keys2.add(String(v).trim());
       }
 
-      const shared = [...keys1].filter(k => keys2.has(k));
-      const only1 = [...keys1].filter(k => !keys2.has(k));
-      const only2 = [...keys2].filter(k => !keys1.has(k));
+      // Single-pass comparison avoids spreading large Sets multiple times
+      let shared = 0;
+      const only1 = [];
+      for (const k of keys1) {
+        if (keys2.has(k)) shared++;
+        else only1.push(k);
+      }
+      const only2 = [];
+      for (const k of keys2) {
+        if (!keys1.has(k)) only2.push(k);
+      }
 
       return {
         file1_keys: keys1.size,
         file2_keys: keys2.size,
-        shared: shared.length,
+        shared,
         only_in_file1: only1.length,
         only_in_file2: only2.length,
         sample_only_file1: only1.slice(0, 5),
@@ -392,15 +476,14 @@ function executeTool(name, input) {
     }
 
     case 'generate_code':
-      // This is handled specially in the agent loop
-      return { status: 'code_submitted' };
+      return { error: 'generate_code is handled by the agent loop, not executeTool' };
 
     default:
       return { error: `Unknown tool: ${name}` };
   }
 }
 
-// ── System Prompt ──────────────────────────────────────────
+// ── System Prompt ─────────────────────────────────────────
 const SYSTEM_PROMPT = `You are an Excel processing agent. The user has uploaded Excel files and wants you to process them.
 
 The user may be working iteratively — previous outputs may already be in the file list. When you see files from earlier runs, use them as context for the current request.
@@ -461,52 +544,95 @@ zip.file(...); const styledBuf = await zip.generateAsync({ type: 'arraybuffer', 
 - Excel dates are serial numbers. Convert: new Date((serial - 25569) * 86400000).
 - Access files by name: files.find(f => f.name.includes('keyword')).`;
 
-// ── Claude API (non-streaming, with tool use) ──────────────
-async function callClaudeWithTools(apiKey, model, system, messages, tools) {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 16384,
-      system,
-      messages,
-      tools,
-    }),
-  });
+// ── Claude API (non-streaming, with tool use + retry) ─────
+async function callClaudeWithTools(apiKey, model, system, messages, tools, signal, maxTokens = MAX_TOKENS_DEFAULT) {
+  for (let attempt = 0; attempt <= MAX_API_RETRIES; attempt++) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Claude API error (${response.status}): ${err}`);
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
+        messages,
+        tools,
+      }),
+    });
+
+    if (response.ok) {
+      let data;
+      try {
+        data = await response.json();
+      } catch (parseErr) {
+        if (attempt < MAX_API_RETRIES) {
+          logTo($logPanel, 'API returned invalid JSON — retrying...', 'log-warn');
+          await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));
+          continue;
+        }
+        throw new Error(`Claude API returned invalid JSON: ${parseErr.message}`);
+      }
+      if (data.usage) {
+        state.totalInputTokens += data.usage.input_tokens || 0;
+        state.totalOutputTokens += data.usage.output_tokens || 0;
+        updateTokenCounter();
+      }
+      return data;
+    }
+
+    let errText;
+    try { errText = await response.text(); } catch { errText = '(could not read response body)'; }
+
+    if (RETRY_STATUS_CODES.includes(response.status) && attempt < MAX_API_RETRIES) {
+      const delay = Math.min(1000 * Math.pow(2, attempt), 8000);
+      logTo($logPanel, `API ${response.status} — retrying in ${delay / 1000}s...`, 'log-warn');
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, delay);
+        signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new DOMException('Aborted', 'AbortError'));
+        }, { once: true });
+      });
+      continue;
+    }
+
+    throw new Error(`Claude API error (${response.status}): ${errText}`);
   }
-
-  return response.json();
 }
 
-// ── Sandboxed Execution ────────────────────────────────────
-// Code runs inside: sandboxed iframe (opaque origin, CSP blocks network) → Web Worker.
+// ── Sandboxed Execution ───────────────────────────────────
+// LLM-generated code runs inside: sandboxed iframe → Web Worker.
+// Why iframe + Worker instead of just a Worker: the iframe's sandbox attribute
+// creates an opaque origin, so the Worker inherits no ambient privileges
+// (no same-origin access, no localStorage, no cookies). The Worker provides
+// async execution without blocking the UI.
 // Libraries are pre-fetched in the trusted parent and passed as source text.
 // The sandbox has zero network access — connect-src 'none' is inherited by the Worker.
 
-let _libsPromise = null;
-let _workerSrcCache = null;
+let libsPromise = null;
 
 function fetchLibraries() {
-  if (!_libsPromise) {
-    _libsPromise = Promise.all([
-      fetch('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js').then(r => r.text()),
-      fetch('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js').then(r => r.text()),
+  if (!libsPromise) {
+    const fetchLib = url => fetch(url).then(r => {
+      if (!r.ok) throw new Error(`Failed to load library from ${url}: HTTP ${r.status}`);
+      return r.text();
+    });
+    libsPromise = Promise.all([
+      fetchLib('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js'),
+      fetchLib('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js'),
     ]).catch(err => {
-      _libsPromise = null; // Allow retry on next call
+      libsPromise = null; // Allow retry on next call
       throw err;
     });
   }
-  return _libsPromise;
+  return libsPromise;
 }
 
 const WORKER_HANDLER = `
@@ -538,28 +664,34 @@ self.onmessage = async function(e) {
 };
 `;
 
-const BRIDGE_HTML = [
-  '<!DOCTYPE html><html><head>',
-  "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob:; worker-src blob:;\">",
-  '</head><body><script>',
-  'window.addEventListener("message", function(e) {',
-  '  var msg = e.data;',
-  '  if (msg.type !== "exec") return;',
-  '  var blob = new Blob([msg.workerSrc], { type: "application/javascript" });',
-  '  var worker = new Worker(URL.createObjectURL(blob));',
-  '  worker.onmessage = function(ev) { parent.postMessage(ev.data, "*"); };',
-  '  worker.onerror = function(err) { parent.postMessage({ type: "error", message: err.message || "Worker error" }, "*"); };',
-  '  var transfers = msg.fileBuffers.map(function(f) { return f.buffer; });',
-  '  worker.postMessage({ code: msg.code, fileBuffers: msg.fileBuffers }, transfers);',
-  '});',
-  'parent.postMessage({ type: "bridge_ready" }, "*");',
-  '<\/script></body></html>',
-].join('\n');
+// HTML injected into the sandboxed iframe via srcdoc. Acts as a bridge:
+// receives the worker source and file buffers from the parent via postMessage,
+// spawns the Web Worker, and relays results back.
+const BRIDGE_HTML = `<!DOCTYPE html><html><head>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob:; worker-src blob:;">
+</head><body><script>
+window.addEventListener("message", function(e) {
+  let msg = e.data;
+  if (msg.type !== "exec") return;
+  let blob = new Blob([msg.workerSrc], { type: "application/javascript" });
+  let worker = new Worker(URL.createObjectURL(blob));
+  worker.onmessage = function(ev) {
+    parent.postMessage(ev.data, "*");
+    if (ev.data.type !== "log") worker.terminate();
+  };
+  worker.onerror = function(err) {
+    parent.postMessage({ type: "error", message: err.message || "Worker error" }, "*");
+    worker.terminate();
+  };
+  let transfers = msg.fileBuffers.map(function(f) { return f.buffer; });
+  worker.postMessage({ code: msg.code, fileBuffers: msg.fileBuffers }, transfers);
+});
+parent.postMessage({ type: "bridge_ready" }, "*");
+<\/script></body></html>`;
 
-async function executeInWorker(code, files) {
+async function executeInWorker(code, files, signal) {
   const [sheetjsSrc, jszipSrc] = await fetchLibraries();
-  if (!_workerSrcCache) _workerSrcCache = sheetjsSrc + ';\n' + jszipSrc + ';\n' + WORKER_HANDLER;
-  const workerSrc = _workerSrcCache;
+  const workerSrc = sheetjsSrc + ';\n' + jszipSrc + ';\n' + WORKER_HANDLER;
 
   return new Promise((resolve, reject) => {
     const iframe = document.createElement('iframe');
@@ -570,7 +702,7 @@ async function executeInWorker(code, files) {
     const timeout = setTimeout(() => {
       cleanup();
       reject(new Error('Worker timed out (120s)'));
-    }, 120000);
+    }, WORKER_TIMEOUT_MS);
 
     function cleanup() {
       clearTimeout(timeout);
@@ -578,6 +710,8 @@ async function executeInWorker(code, files) {
       if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
     }
 
+    // The iframe has an opaque origin (sandbox without allow-same-origin),
+    // so e.origin is "null" — we validate with e.source instead.
     function onMessage(e) {
       if (e.source !== iframe.contentWindow) return;
       const msg = e.data;
@@ -605,14 +739,19 @@ async function executeInWorker(code, files) {
 
     window.addEventListener('message', onMessage);
     document.body.appendChild(iframe);
+
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        cleanup();
+        reject(new DOMException('Aborted', 'AbortError'));
+      }, { once: true });
+    }
   });
 }
 
-// ── Download ───────────────────────────────────────────────
-function downloadFile(buffer, filename) {
-  if (!filename || !filename.endsWith('.xlsx')) {
-    filename = (filename || 'output') + '.xlsx';
-  }
+// ── Download ──────────────────────────────────────────────
+function downloadFile(buffer, filename = 'output.xlsx') {
+  if (!filename.endsWith('.xlsx')) filename += '.xlsx';
   const blob = new Blob([buffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
@@ -633,9 +772,121 @@ $downloadBtn.addEventListener('click', () => {
   if (state.outputBuffer) downloadFile(state.outputBuffer, state.outputFilename);
 });
 
-// ── Agent Loop ─────────────────────────────────────────────
-const MAX_TURNS = 20;
-const MAX_CODE_RETRIES = 3;
+// ── Context Window Management ─────────────────────────────
+function pruneMessages(messages) {
+  // Replace old tool_result content blocks with summaries.
+  // Keep the last few message pairs (most recent context) intact.
+  if (messages.length <= PRUNE_KEEP_RECENT + 1) return false;
+
+  let pruned = false;
+  for (let i = 1; i < messages.length - PRUNE_KEEP_RECENT; i++) {
+    const msg = messages[i];
+    if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
+    msg.content = msg.content.map(block => {
+      if (block.type === 'tool_result' && typeof block.content === 'string' && block.content.length > PRUNE_CONTENT_LIMIT) {
+        pruned = true;
+        return { ...block, content: block.content.slice(0, PRUNE_CONTENT_LIMIT) + '... [pruned for context]' };
+      }
+      return block;
+    });
+  }
+  return pruned;
+}
+
+// ── Code Execution + Verification ─────────────────────────
+// Extracted from the agent loop for clarity. Handles executing LLM-generated
+// code in the sandbox, verifying the output, and returning a structured result.
+
+async function executeGeneratedCode({ id, input, signal }) {
+  const code = input.code;
+  const filename = input.filename || 'output.xlsx';
+
+  clearPanel($codePanel);
+  $codePanel.textContent = code;
+  if (input.explanation) logTo($logPanel, `Code: ${input.explanation}`, 'log-meta');
+
+  let result;
+  try {
+    setStatus('Executing code...');
+    result = await executeInWorker(code, state.files, signal);
+  } catch (execErr) {
+    if (execErr.name === 'AbortError') throw execErr;
+    logTo($logPanel, `Execution failed: ${execErr.message}`, 'log-error');
+    return {
+      action: 'retry',
+      toolResult: {
+        type: 'tool_result', tool_use_id: id,
+        content: `Execution error: ${execErr.message}\n\nPlease fix the code. You can use read_rows to re-examine the files if needed.`,
+        is_error: true,
+      },
+    };
+  }
+
+  // Verify output
+  let verifyMsg = `Output: ${filename} (${(result.buffer.byteLength / 1024).toFixed(0)} KB)`;
+  let verifyWb = null;
+
+  try {
+    verifyWb = parseWorkbook(result.buffer);
+    const verifyWs = verifyWb.Sheets[verifyWb.SheetNames[0]];
+    const verifyRows = getSheetRows(verifyWs);
+    verifyMsg += ` — ${verifyRows.length} rows`;
+
+    // Check for all-zeros problem (common LLM code failure mode)
+    if (verifyRows.length > 2) {
+      const dataStart = Math.min(2, verifyRows.length - 1);
+      const sampled = verifyRows.slice(dataStart, Math.min(dataStart + 5, verifyRows.length));
+      const allZeros = sampled.length > 0 && sampled.every(row => {
+        const nums = (row || []).filter(v => typeof v === 'number');
+        return nums.length > 0 && nums.every(v => v === 0);
+      });
+      if (allZeros) {
+        verifyMsg += ' — WARNING: data rows have all zeros in numeric columns!';
+        logTo($logPanel, verifyMsg, 'log-error');
+        return {
+          action: 'retry',
+          toolResult: {
+            type: 'tool_result', tool_use_id: id,
+            content: `Code executed but output has ALL ZEROS in data rows. Sample rows ${dataStart}-${dataStart + sampled.length - 1}: ${JSON.stringify(sampled.slice(0, 3))}. Headers: ${JSON.stringify(verifyRows[0])}. Please investigate and fix.`,
+          },
+          buffer: result.buffer, filename, verifyWb,
+        };
+      }
+    }
+
+    // Sample rows for verification message
+    verifyMsg += '\nSample output rows:';
+    for (let i = 0; i < Math.min(5, verifyRows.length); i++) {
+      verifyMsg += `\n  Row ${i}: ${JSON.stringify(verifyRows[i]).slice(0, 200)}`;
+    }
+  } catch (ve) {
+    verifyMsg += ` — verify error: ${ve.message}`;
+  }
+
+  // Success — store output, preview, switch tab
+  state.outputBuffer = result.buffer;
+  state.outputFilename = filename;
+  $downloadBtn.hidden = false;
+  setStatus('Done — ask a follow-up or download');
+  logTo($logPanel, verifyMsg, 'log-success');
+
+  addGeneratedFile(result.buffer, filename, verifyWb);
+  showPreview(verifyWb);
+  switchTab('preview');
+
+  return {
+    action: 'success',
+    toolResult: { type: 'tool_result', tool_use_id: id, content: `Success. ${verifyMsg}` },
+  };
+}
+
+// ── Agent Loop ────────────────────────────────────────────
+$cancelBtn.addEventListener('click', () => {
+  if (state.abortController) {
+    state.abortController.abort();
+    logTo($logPanel, 'Cancelling...', 'log-warn');
+  }
+});
 
 $runBtn.addEventListener('click', async () => {
   const apiKey = $apiKey.value.trim();
@@ -647,8 +898,14 @@ $runBtn.addEventListener('click', async () => {
   clearPanel($logPanel);
   $downloadBtn.hidden = true;
   $runBtn.disabled = true;
+  $cancelBtn.hidden = false;
   state.outputBuffer = null;
   state.outputFilename = null;
+  state.running = true;
+  state.totalInputTokens = 0;
+  state.totalOutputTokens = 0;
+  state.abortController = new AbortController();
+  updateTokenCounter();
 
   const fileList = state.files.map(f => f.name).join(', ');
   const messages = [
@@ -657,24 +914,37 @@ $runBtn.addEventListener('click', async () => {
 
   try {
     let codeRetries = 0;
+    const signal = state.abortController.signal;
 
-    for (let turn = 0; turn < MAX_TURNS; turn++) {
+    for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+
       setStatus(`Agent thinking (turn ${turn + 1})...`);
 
-      const response = await callClaudeWithTools(apiKey, model, SYSTEM_PROMPT, messages, TOOLS);
+      if (state.totalInputTokens > TOKEN_PRUNE_THRESHOLD && pruneMessages(messages)) {
+        logTo($logPanel, 'Pruned old tool results to manage context window.', 'log-warn');
+      }
 
-      // Process response content blocks
+      let response = await callClaudeWithTools(apiKey, model, SYSTEM_PROMPT, messages, TOOLS, signal);
+
+      // Handle max_tokens truncation: if last block is tool_use, retry with higher limit
+      if (response.stop_reason === 'max_tokens') {
+        const last = response.content[response.content.length - 1];
+        if (last?.type === 'tool_use') {
+          logTo($logPanel, 'Response truncated mid-tool-call — retrying with higher limit...', 'log-warn');
+          response = await callClaudeWithTools(apiKey, model, SYSTEM_PROMPT, messages, TOOLS, signal, MAX_TOKENS_EXTENDED);
+        }
+      }
+
       const assistantContent = response.content;
       messages.push({ role: 'assistant', content: assistantContent });
 
-      // Handle text blocks (Claude's thinking/explanations)
       for (const block of assistantContent) {
         if (block.type === 'text' && block.text.trim()) {
           logTo($logPanel, block.text, 'log-meta');
         }
       }
 
-      // If no tool use, Claude is done talking
       if (response.stop_reason !== 'tool_use') {
         setStatus('Agent finished without generating code');
         logTo($logPanel, 'Agent did not produce output code.', 'log-warn');
@@ -686,134 +956,44 @@ $runBtn.addEventListener('click', async () => {
 
       for (const block of assistantContent) {
         if (block.type !== 'tool_use') continue;
+        if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
         const { id, name, input } = block;
-        logTo($logPanel, `→ ${name}(${JSON.stringify(input).slice(0, 100)}${JSON.stringify(input).length > 100 ? '...' : ''})`, 'log-info');
+        const inputStr = JSON.stringify(input);
+        logTo($logPanel, `\u2192 ${name}(${inputStr.slice(0, 100)}${inputStr.length > 100 ? '...' : ''})`, 'log-info');
 
-        // Special handling for generate_code
+        // Code generation — handled by extracted function
         if (name === 'generate_code') {
-          const code = input.code;
-          const filename = input.filename || 'output.xlsx';
+          const gen = await executeGeneratedCode({ id, input, signal });
 
-          // Show code in the code panel
-          clearPanel($codePanel);
-          $codePanel.textContent = code;
-
-          if (input.explanation) {
-            logTo($logPanel, `Code: ${input.explanation}`, 'log-meta');
+          if (gen.action === 'success') {
+            toolResults.push(gen.toolResult);
+            messages.push({ role: 'user', content: toolResults });
+            return;
           }
 
-          // Execute in worker
-          try {
-            setStatus('Executing code...');
-            const result = await executeInWorker(code, state.files);
+          // Retry path
+          codeRetries++;
+          toolResults.push(gen.toolResult);
 
-            // Verify output
-            let verifyMsg = `Output: ${filename} (${(result.buffer.byteLength / 1024).toFixed(0)} KB)`;
-            try {
-              const vwb = XLSX.read(result.buffer, { type: 'array' });
-              const vws = vwb.Sheets[vwb.SheetNames[0]];
-              const vrows = XLSX.utils.sheet_to_json(vws, { header: 1, defval: null });
-              verifyMsg += ` — ${vrows.length} rows`;
-
-              // Check for all-zeros problem
-              if (vrows.length > 5) {
-                const sample = vrows[5];
-                const numCols = sample.filter(v => typeof v === 'number');
-                const allZero = numCols.length > 0 && numCols.every(v => v === 0);
-                if (allZero) {
-                  verifyMsg += ' — WARNING: sample data row has all zeros in numeric columns!';
-                  // Tell Claude about the problem
-                  toolResults.push({
-                    type: 'tool_result',
-                    tool_use_id: id,
-                    content: `Code executed but output has ALL ZEROS in data rows. This means the code did not correctly read values from the input files. Row 5 sample: ${JSON.stringify(sample)}. First 3 header rows: ${JSON.stringify(vrows.slice(0, 3))}. Please investigate and fix — re-read the input files and verify you're reading from the correct rows/columns.`,
-                  });
-                  codeRetries++;
-                  logTo($logPanel, verifyMsg, 'log-error');
-
-                  if (codeRetries >= MAX_CODE_RETRIES) {
-                    // Accept it anyway
-                    state.outputBuffer = result.buffer;
-                    state.outputFilename = filename;
-                    $downloadBtn.hidden = false;
-                    addGeneratedFile(result.buffer, filename);
-                    showPreview(result.buffer);
-                    setStatus('Done (with warnings) — ask a follow-up or download');
-                    logTo($logPanel, 'Max retries reached. Output available but may have issues.', 'log-warn');
-                    updateRunBtn();
-                    return;
-                  }
-                  continue; // Skip success, let agent loop continue
-                }
-              }
-
-              // Sample rows for verification
-              verifyMsg += '\nSample output rows:';
-              for (let i = 0; i < Math.min(3, vrows.length); i++) {
-                verifyMsg += `\n  Row ${i}: ${JSON.stringify(vrows[i]).slice(0, 200)}`;
-              }
-              if (vrows.length > 4) {
-                verifyMsg += `\n  Row 4: ${JSON.stringify(vrows[4]).slice(0, 200)}`;
-                verifyMsg += `\n  Row 5: ${JSON.stringify(vrows[5]).slice(0, 200)}`;
-              }
-            } catch (ve) {
-              verifyMsg += ` — verify error: ${ve.message}`;
-            }
-
-            // Success — store output, add to files, show preview
-            state.outputBuffer = result.buffer;
-            state.outputFilename = filename;
-            $downloadBtn.hidden = false;
-            setStatus('Done — ask a follow-up or download');
-            logTo($logPanel, verifyMsg, 'log-success');
-
-            // Add output as a new input file for iterative work
-            addGeneratedFile(result.buffer, filename);
-            showPreview(result.buffer);
-
-            // Auto-switch to preview tab
-            document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
-            document.querySelector('[data-tab="preview"]').classList.add('active');
-            $codePanel.classList.add('hidden');
-            $previewPanel.classList.remove('hidden');
-
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: id,
-              content: `Success. ${verifyMsg}`,
-            });
-
-            // Push tool results and end
-            messages.push({ role: 'user', content: toolResults });
-            updateRunBtn();
-            return;
-
-          } catch (execErr) {
-            codeRetries++;
-            logTo($logPanel, `Execution failed: ${execErr.message}`, 'log-error');
-
-            if (codeRetries >= MAX_CODE_RETRIES) {
+          if (codeRetries >= MAX_CODE_RETRIES) {
+            if (gen.buffer) {
+              // Output exists but has issues — offer it anyway
+              state.outputBuffer = gen.buffer;
+              state.outputFilename = gen.filename;
+              $downloadBtn.hidden = false;
+              addGeneratedFile(gen.buffer, gen.filename, gen.verifyWb);
+              showPreview(gen.verifyWb);
+              setStatus('Done (with warnings) — ask a follow-up or download');
+              logTo($logPanel, 'Max retries reached. Output available but may have issues.', 'log-warn');
+            } else {
               setStatus('Failed');
               logTo($logPanel, 'Max code retries reached.', 'log-error');
-              toolResults.push({
-                type: 'tool_result',
-                tool_use_id: id,
-                content: `Execution failed after ${MAX_CODE_RETRIES} attempts. Last error: ${execErr.message}`,
-                is_error: true,
-              });
-              messages.push({ role: 'user', content: toolResults });
-              updateRunBtn();
-              return;
             }
-
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: id,
-              content: `Execution error: ${execErr.message}\n\nPlease fix the code. You can use read_rows to re-examine the files if needed.`,
-              is_error: true,
-            });
+            messages.push({ role: 'user', content: toolResults });
+            return;
           }
+
           continue;
         }
 
@@ -821,13 +1001,11 @@ $runBtn.addEventListener('click', async () => {
         const result = executeTool(name, input);
         const resultStr = JSON.stringify(result, null, 2);
 
-        // Truncate very long results
-        const maxLen = 4000;
-        const truncated = resultStr.length > maxLen
-          ? resultStr.slice(0, maxLen) + `\n... (truncated, ${resultStr.length} chars total)`
+        const truncated = resultStr.length > TOOL_RESULT_MAX_CHARS
+          ? resultStr.slice(0, TOOL_RESULT_MAX_CHARS) + `\n... (truncated, ${resultStr.length} chars total)`
           : resultStr;
 
-        logTo($logPanel, `  ← ${truncated.slice(0, 200)}${truncated.length > 200 ? '...' : ''}`, 'log-info');
+        logTo($logPanel, `  \u2190 ${truncated.slice(0, 200)}${truncated.length > 200 ? '...' : ''}`, 'log-info');
 
         toolResults.push({
           type: 'tool_result',
@@ -836,7 +1014,6 @@ $runBtn.addEventListener('click', async () => {
         });
       }
 
-      // Send all tool results back
       if (toolResults.length > 0) {
         messages.push({ role: 'user', content: toolResults });
       }
@@ -846,9 +1023,17 @@ $runBtn.addEventListener('click', async () => {
     logTo($logPanel, 'Agent loop hit turn limit.', 'log-warn');
 
   } catch (err) {
-    setStatus('Error');
-    logTo($logPanel, `Error: ${err.message}`, 'log-error');
+    if (err.name === 'AbortError') {
+      setStatus('Cancelled');
+      logTo($logPanel, 'Run cancelled by user.', 'log-warn');
+    } else {
+      setStatus('Error');
+      logTo($logPanel, `Error: ${err.message}`, 'log-error');
+    }
   } finally {
+    state.running = false;
+    state.abortController = null;
+    $cancelBtn.hidden = true;
     updateRunBtn();
   }
 });

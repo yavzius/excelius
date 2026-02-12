@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- CSP: restrict scripts to self + SheetJS CDN, connections to API + CDNs, blob: frames for sandboxed execution -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://cdn.sheetjs.com; connect-src https://api.anthropic.com https://cdn.sheetjs.com https://cdnjs.cloudflare.com; style-src 'unsafe-inline'; frame-src blob:;">
   <title>Excelius</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -15,6 +17,13 @@
     h1 { font-size: 1.3rem; color: #fff; margin-bottom: 0.25rem; }
     .subtitle { font-size: 0.8rem; color: #666; margin-bottom: 1.5rem; }
 
+    /* Utility */
+    .visually-hidden {
+      position: absolute; width: 1px; height: 1px;
+      padding: 0; margin: -1px; overflow: hidden;
+      clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
+
     /* API Key */
     .api-key-row {
       display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem;
@@ -25,7 +34,7 @@
       border: 1px solid #333; border-radius: 4px; color: #e0e0e0;
       font-size: 0.85rem; font-family: monospace;
     }
-    .api-key-row input:focus { outline: none; border-color: #555; }
+    .api-key-row input:focus { outline: 2px solid #4a9; outline-offset: 1px; border-color: #555; }
 
     /* Drop Zone */
     .drop-zone {
@@ -33,6 +42,7 @@
       text-align: center; cursor: pointer; transition: border-color 0.2s;
       margin-bottom: 1rem;
     }
+    .drop-zone:focus-visible { outline: 2px solid #4a9; outline-offset: 2px; }
     .drop-zone.dragover { border-color: #4a9; background: rgba(68,170,153,0.05); }
     .drop-zone p { color: #666; font-size: 0.9rem; }
     .drop-zone .hint { font-size: 0.75rem; color: #444; margin-top: 0.25rem; }
@@ -67,7 +77,7 @@
       background: #1a1a1a; color: #e0e0e0; border: 1px solid #333;
       border-radius: 6px; font-size: 0.9rem; resize: vertical;
     }
-    .prompt-area textarea:focus { outline: none; border-color: #555; }
+    .prompt-area textarea:focus { outline: 2px solid #4a9; outline-offset: 1px; border-color: #555; }
     .prompt-area textarea::placeholder { color: #555; }
 
     /* Controls */
@@ -78,11 +88,16 @@
     }
     button:hover { background: #2a2a2a; }
     button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button:focus-visible { outline: 2px solid #4a9; outline-offset: 2px; }
     .btn-run { border-color: #4a9; color: #4a9; font-weight: 600; }
     .btn-run:hover:not(:disabled) { background: rgba(68,170,153,0.1); }
+    .btn-cancel { border-color: #e55; color: #e55; }
+    .btn-cancel:hover:not(:disabled) { background: rgba(238,85,85,0.1); }
     .btn-download { border-color: #68b; color: #68b; }
     .btn-download:hover { background: rgba(102,136,187,0.1); }
     .status { font-size: 0.8rem; color: #666; margin-left: 0.5rem; }
+    .tokens { font-size: 0.7rem; color: #555; font-family: monospace; }
+    .spacer { flex: 1; }
 
     /* Output Panels */
     .panels {
@@ -105,9 +120,10 @@
       text-transform: uppercase; letter-spacing: 0.05em;
     }
     .panel-tab:hover { color: #888; }
+    .panel-tab:focus-visible { outline: 2px solid #4a9; outline-offset: -2px; }
     .panel-tab.active { color: #e0e0e0; border-bottom: 1px solid #4a9; }
     .panel-body {
-      padding: 0.75rem; font-family: 'SF Mono', 'Fira Code', monospace;
+      padding: 0.75rem; font-family: 'SF Mono', 'Cascadia Code', 'Consolas', 'Fira Code', monospace;
       font-size: 0.8rem; white-space: pre-wrap; overflow-y: auto;
       max-height: 400px; min-height: 200px; flex: 1;
     }
@@ -117,7 +133,7 @@
     .preview-wrap { overflow: auto; max-height: 400px; min-height: 200px; flex: 1; }
     .preview-table {
       width: 100%; border-collapse: collapse; font-size: 0.7rem;
-      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-family: 'SF Mono', 'Cascadia Code', 'Consolas', 'Fira Code', monospace;
     }
     .preview-table th, .preview-table td {
       padding: 0.25rem 0.5rem; border: 1px solid #2a2a2a;
@@ -147,6 +163,7 @@
       border: 1px solid #333; border-radius: 4px;
       color: #888; font-size: 0.8rem;
     }
+    .model-select:focus-visible { outline: 2px solid #4a9; outline-offset: 2px; }
 
     @media (max-width: 768px) {
       .panels { grid-template-columns: 1fr; }
@@ -155,55 +172,69 @@
   </style>
 </head>
 <body>
-  <div class="container">
-    <h1>Excelius</h1>
-    <p class="subtitle">Drop files, describe what you want, get a styled output. Iterate. All data stays local.</p>
+  <main class="container">
+    <header>
+      <h1>Excelius</h1>
+      <p class="subtitle">Drop files, describe what you want, get a styled output. Iterate. All data stays local.</p>
+    </header>
 
-    <div class="api-key-row">
-      <label for="apiKey">API Key</label>
-      <input type="password" id="apiKey" placeholder="sk-ant-...">
-    </div>
+    <section aria-label="Configuration">
+      <div class="api-key-row">
+        <label for="apiKey">API Key</label>
+        <input type="password" id="apiKey" placeholder="sk-ant-...">
+      </div>
+    </section>
 
-    <div class="drop-zone" id="dropZone">
-      <p>Drop .xlsx files here or click to browse</p>
-      <p class="hint">Files are processed locally — only structure metadata is sent to Claude</p>
-      <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.csv" hidden>
-    </div>
+    <section aria-label="File upload">
+      <div class="drop-zone" id="dropZone" role="button" tabindex="0"
+           aria-label="Upload Excel files. Drop files here or press Enter to browse.">
+        <p>Drop .xlsx files here or click to browse</p>
+        <p class="hint">Your files stay local. Claude sees row samples and column stats to understand structure — not full datasets.</p>
+        <input type="file" id="fileInput" multiple accept=".xlsx,.xls,.csv" hidden>
+      </div>
+      <div class="file-list" id="fileList" aria-label="Uploaded files"></div>
+    </section>
 
-    <div class="file-list" id="fileList"></div>
+    <section aria-label="Prompt">
+      <div class="prompt-area">
+        <label for="prompt" class="visually-hidden">Describe what you want done with these files</label>
+        <textarea id="prompt" placeholder="Describe what you want done with these files...&#10;&#10;Example: Merge these by account, sum Q1 columns, bold headers.&#10;After output: Now add a percentage column and format as currency."></textarea>
+      </div>
 
-    <div class="prompt-area">
-      <textarea id="prompt" placeholder="Describe what you want done with these files...&#10;&#10;Example: Merge these by account, sum Q1 columns, bold headers.&#10;After output: Now add a percentage column and format as currency."></textarea>
-    </div>
+      <div class="controls">
+        <button class="btn-run" id="runBtn" disabled>Run</button>
+        <button class="btn-cancel" id="cancelBtn" hidden>Cancel</button>
+        <label for="modelSelect" class="visually-hidden">Model</label>
+        <select class="model-select" id="modelSelect">
+          <option value="claude-sonnet-4-5-20250929">Sonnet 4.5</option>
+          <option value="claude-opus-4-6">Opus 4.6</option>
+        </select>
+        <span class="status" id="status"></span>
+        <span class="tokens" id="tokenCounter"></span>
+        <span class="spacer"></span>
+        <button class="btn-download" id="downloadBtn" hidden>Download Output</button>
+      </div>
+    </section>
 
-    <div class="controls">
-      <button class="btn-run" id="runBtn" disabled>Run</button>
-      <select class="model-select" id="modelSelect">
-        <option value="claude-sonnet-4-5-20250929">Sonnet 4.5</option>
-        <option value="claude-opus-4-6">Opus 4.6</option>
-      </select>
-      <span class="status" id="status"></span>
-      <span style="flex:1"></span>
-      <button class="btn-download" id="downloadBtn" hidden>Download Output</button>
-    </div>
-
-    <div class="panels">
-      <div class="panel">
-        <div class="panel-header">
-          <button class="panel-tab active" data-tab="code">Code</button>
-          <button class="panel-tab" data-tab="preview">Preview</button>
+    <section aria-label="Output">
+      <div class="panels">
+        <div class="panel">
+          <div class="panel-header" role="tablist">
+            <button class="panel-tab active" data-tab="code" role="tab" aria-selected="true">Code</button>
+            <button class="panel-tab" data-tab="preview" role="tab" aria-selected="false">Preview</button>
+          </div>
+          <div class="panel-body" id="codePanel" role="tabpanel">Waiting for code generation...</div>
+          <div class="preview-wrap hidden" id="previewPanel" role="tabpanel">
+            <div class="preview-empty">Output preview will appear here</div>
+          </div>
         </div>
-        <div class="panel-body" id="codePanel"></div>
-        <div class="preview-wrap hidden" id="previewPanel">
-          <div class="preview-empty">Output preview will appear here</div>
+        <div class="panel">
+          <div class="panel-header">Log</div>
+          <div class="panel-body" id="logPanel">Waiting for agent activity...</div>
         </div>
       </div>
-      <div class="panel">
-        <div class="panel-header">Log</div>
-        <div class="panel-body" id="logPanel"></div>
-      </div>
-    </div>
-  </div>
+    </section>
+  </main>
 
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
   <script type="module" src="app.js"></script>
