@@ -1,16 +1,10 @@
 {
   "name": "evals",
-  "module": "index.ts",
-  "type": "module",
   "private": true,
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5"
-  },
-  "dependencies": {
-    "jszip": "^3.10.1",
-    "xlsx": "^0.18.5"
   }
 }
