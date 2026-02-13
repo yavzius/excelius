@@ -1,0 +1,13 @@
+{
+  "name": "excelius",
+  "private": true,
+  "scripts": {
+    "dev": "bun run src/server.js",
+    "evals": "bun evals/run.js"
+  },
+  "dependencies": {
+    "hono": "^4",
+    "jszip": "^3.10.1",
+    "xlsx": "^0.18.5"
+  }
+}

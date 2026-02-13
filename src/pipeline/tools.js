@@ -1,11 +1,8 @@
-// Headless tool execution for eval runner.
-// Mirrors app.js executeTool() but without DOM dependencies.
+// Tool executor for the exploration agent.
+// Creates a closure over parsed files and returns an executor function.
 
 const XLSX = require('xlsx');
-
-const MAX_READ_ROWS = 50;
-const MAX_UNIQUE_VALUES = 30;
-const TOOL_RESULT_MAX_CHARS = 4000;
+const { MAX_READ_ROWS, MAX_UNIQUE_VALUES } = require('./constants');
 
 const sheetJsonCache = new WeakMap();
 function getSheetRows(ws) {
@@ -20,7 +17,6 @@ function parseWorkbook(buffer) {
 }
 
 function createToolExecutor(files) {
-  // files: [{ name, buffer (Buffer) }]
   const parsed = files.map(f => {
     const wb = parseWorkbook(f.buffer);
     return { name: f.name, buffer: f.buffer, wb };
@@ -159,4 +155,4 @@ function createToolExecutor(files) {
   };
 }
 
-module.exports = { createToolExecutor, parseWorkbook, getSheetRows, TOOL_RESULT_MAX_CHARS };
+module.exports = { createToolExecutor, parseWorkbook, getSheetRows };

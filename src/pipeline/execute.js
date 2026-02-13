@@ -1,12 +1,11 @@
-// Headless code execution for eval verification.
-// Mirrors the browser's sandboxed iframe + Worker execution, but in Node.js.
+// Headless code execution.
+// Runs LLM-generated code in a Function sandbox with XLSX + JSZip.
 
 const XLSX = require('xlsx');
 const JSZip = require('jszip');
+const { EXECUTION_TIMEOUT_MS } = require('./constants');
 
-const EXECUTION_TIMEOUT_MS = 30_000;
-
-async function executeCode(code, files) {
+async function execute(code, files) {
   const logs = [];
   const log = (msg) => logs.push(String(msg));
 
@@ -25,7 +24,6 @@ async function executeCode(code, files) {
     throw new Error('Code must return { buffer, filename }');
   }
 
-  // Normalize to Node Buffer
   const buffer = result.buffer instanceof ArrayBuffer
     ? Buffer.from(result.buffer)
     : Buffer.isBuffer(result.buffer) ? result.buffer : Buffer.from(result.buffer);
@@ -33,4 +31,4 @@ async function executeCode(code, files) {
   return { buffer, filename: result.filename || 'output.xlsx', logs };
 }
 
-module.exports = { executeCode };
+module.exports = { execute };
